@@ -10,7 +10,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 import uvicorn
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.types import ASGIApp
 
 from .engine import BrowserSession, output_root
@@ -64,6 +64,80 @@ def transport_security_from_env() -> TransportSecuritySettings:
 
 mcp = FastMCP("reel-studio", transport_security=transport_security_from_env())
 sessions: dict[str, BrowserSession] = {}
+
+
+def landing_page() -> str:
+    """Render the public HTTP landing page without exposing credentials."""
+    public_base_url = os.environ.get("REEL_PUBLIC_BASE_URL", "").rstrip("/")
+    mcp_endpoint = f"{public_base_url}/mcp" if public_base_url else "/mcp"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>reel-studio · narrated web app videos</title>
+  <style>
+    :root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }}
+    body {{ margin: 0; background: #10131a; color: #edf1f7; }}
+    main {{ max-width: 860px; margin: 0 auto; padding: 64px 24px 80px; }}
+    .eyebrow {{ color: #8ea7ff; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }}
+    h1 {{ font-size: clamp(2.5rem, 8vw, 5rem); line-height: .98; margin: 16px 0 24px; }}
+    h2 {{ margin-top: 48px; color: #cbd5ff; }}
+    p, li {{ color: #b9c1d2; font-size: 1.05rem; line-height: 1.65; }}
+    code, pre {{ background: #1b2130; border: 1px solid #303a52; border-radius: 10px; }}
+    code {{ padding: 2px 6px; color: #d5ddff; }}
+    pre {{ overflow-x: auto; padding: 18px; color: #d5ddff; }}
+    a {{ color: #9eb1ff; }}
+    .tools {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; padding: 0; list-style: none; }}
+    .tools li {{ background: #171c27; border: 1px solid #2a3348; border-radius: 12px; padding: 16px; }}
+    .tools strong {{ display: block; color: #edf1f7; margin-bottom: 6px; }}
+    .endpoint {{ border-left: 3px solid #7188ff; padding: 12px 16px; background: #171c27; }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">reel-studio</div>
+    <h1>Direct narrated videos of any web app.</h1>
+    <p>reel-studio is an MCP server that lets an AI agent observe a web app,
+    perform browser actions one at a time, narrate each step, and render the
+    result as a downloadable screen-recording video.</p>
+
+    <h2>How it works</h2>
+    <p>The agent starts a headed Chromium session, observes the current UI,
+    directs individual actions with optional narration, then finishes to get
+    an MP4 with the narration mixed into the recording.</p>
+
+    <h2>MCP tools</h2>
+    <ul class="tools">
+      <li><strong>start_session</strong>Launch a browser and begin recording.</li>
+      <li><strong>observe</strong>Capture a screenshot and interactive element refs.</li>
+      <li><strong>act</strong>Perform one browser action with optional narration.</li>
+      <li><strong>finish</strong>Render the MP4 and return its path and URL.</li>
+    </ul>
+
+    <h2>Connect from Claude Code</h2>
+    <p class="endpoint">MCP endpoint: <code>{mcp_endpoint}</code></p>
+    <!-- Example placeholder: Bearer <YOUR_TOKEN> -->
+    <pre><code>claude mcp add --transport http reel-studio {mcp_endpoint} \
+  --header "Authorization: Bearer &lt;YOUR_TOKEN&gt;"</code></pre>
+    <p>The placeholder is the server's <code>REEL_API_TOKEN</code> environment
+    variable. Never commit or share the real token.</p>
+    <p><a href="https://github.com/magnusfroste/reel-studio">View reel-studio on GitHub</a></p>
+  </main>
+</body>
+</html>"""
+
+
+@mcp.custom_route("/", methods=["GET"], include_in_schema=False)
+async def home(request: Request) -> Response:
+    """Serve the public documentation landing page."""
+    return HTMLResponse(landing_page())
+
+
+@mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+async def health(request: Request) -> Response:
+    """Return a lightweight service health response."""
+    return JSONResponse({"status": "ok"})
 
 
 @mcp.tool()
@@ -123,6 +197,8 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self.token = token
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        if request.method == "GET" and request.url.path in {"/", "/health"}:
+            return await call_next(request)
         authorization = request.headers.get("authorization", "")
         scheme, _, supplied_token = authorization.partition(" ")
         if scheme.lower() != "bearer" or not hmac.compare_digest(
