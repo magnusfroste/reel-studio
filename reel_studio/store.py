@@ -173,6 +173,20 @@ def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def list_finished_sessions() -> list[dict[str, Any]]:
+    init_schema()
+    with _lock, _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, start_url, duration_seconds, finished_at, video_path, video_url
+            FROM sessions
+            WHERE status = 'finished'
+            ORDER BY finished_at DESC, created_at DESC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def get_session(session_id: str) -> dict[str, Any] | None:
     init_schema()
     with _lock, _connect() as connection:

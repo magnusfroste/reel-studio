@@ -115,6 +115,12 @@ PAGE_STYLES = """
     .tool { margin: 18px 0; }
     .tool code { color: #fff; font-size: 1rem; }
     .muted { color: #8490a8; }
+    .theater-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+    .video-card { overflow: hidden; padding: 0; }
+    .video-card video { display: block; width: 100%; background: #080b11; }
+    .video-card-body { padding: 18px; }
+    .video-card h3 { overflow-wrap: anywhere; }
+    .placeholder { border: 1px dashed #405070; border-radius: 14px; padding: 28px; text-align: center; }
 """
 
 
@@ -130,7 +136,7 @@ def page_shell(title: str, content: str) -> str:
 </head>
 <body>
   <main>
-    <nav><strong>reel-studio</strong><span><a href="/">Home</a> · <a href="/docs">Docs</a></span></nav>
+    <nav><strong>reel-studio</strong><span><a href="/">Home</a> · <a href="/theater">Theater</a> · <a href="/docs">Docs</a></span></nav>
     {content}
   </main>
 </body>
@@ -142,9 +148,94 @@ def mcp_endpoint() -> str:
     return f"{public_base_url}/mcp" if public_base_url else "/mcp"
 
 
+def video_url(session_id: str) -> str:
+    """Return the public relative URL for a finished session video."""
+    return f"/videos/{session_id}/video.mp4"
+
+
+def format_duration(duration: float | None) -> str:
+    return f"{duration:.1f}s" if duration is not None else "Duration unavailable"
+
+
+def video_card(session: dict) -> str:
+    session_id = html.escape(session["id"], quote=True)
+    title = html.escape(session["start_url"])
+    duration = html.escape(format_duration(session.get("duration_seconds")))
+    finished_at = html.escape(session.get("finished_at") or "Recently finished")
+    return f"""
+    <article class="video-card card" data-session-id="{session_id}">
+      <video controls preload="metadata" src="{video_url(session_id)}"></video>
+      <div class="video-card-body">
+        <h3>{title}</h3>
+        <p class="muted">{duration} · {finished_at}</p>
+      </div>
+    </article>"""
+
+
+def video_refresh_script(container_id: str, featured: bool = False) -> str:
+    mode = "true" if featured else "false"
+    return f"""<script>
+    (() => {{
+      const container = document.getElementById("{container_id}");
+      const featured = {mode};
+      const card = (item) => {{
+        const article = document.createElement("article");
+        article.className = "video-card card";
+        article.dataset.sessionId = item.id;
+        const player = document.createElement("video");
+        player.controls = true;
+        player.preload = "metadata";
+        player.src = `/videos/${{item.id}}/video.mp4`;
+        const body = document.createElement("div");
+        body.className = "video-card-body";
+        const heading = document.createElement("h3");
+        heading.textContent = item.start_url;
+        const meta = document.createElement("p");
+        meta.className = "muted";
+        meta.textContent = `${{item.duration_seconds == null ? "Duration unavailable" : item.duration_seconds.toFixed(1) + "s"}} · ${{item.finished_at || "Recently finished"}}`;
+        body.append(heading, meta);
+        article.append(player, body);
+        return article;
+      }};
+      const refresh = async () => {{
+        try {{
+          const response = await fetch("/api/videos", {{cache: "no-store"}});
+          if (!response.ok) return;
+          const items = await response.json();
+          if (featured) {{
+            const latest = items[0];
+            if (!latest || container.dataset.sessionId === latest.id) return;
+            container.replaceChildren(card(latest));
+            container.dataset.sessionId = latest.id;
+            return;
+          }}
+          const existing = new Set([...container.children].map((item) => item.dataset.sessionId));
+          items.slice().reverse().forEach((item) => {{
+            if (!existing.has(item.id)) container.prepend(card(item));
+          }});
+          const empty = container.querySelector("[data-empty]");
+          if (empty && items.length) empty.remove();
+        }} catch (_) {{}}
+      }};
+      setInterval(refresh, 10000);
+    }})();
+    </script>"""
+
+
 def landing_page() -> str:
     """Render the marketing landing page without exposing credentials."""
     endpoint = html.escape(mcp_endpoint())
+    latest = store.list_finished_sessions()[:1]
+    featured = latest[0] if latest else None
+    featured_content = (
+        f"""<div id="featured-video" data-session-id="{html.escape(featured["id"], quote=True)}">
+          {video_card(featured)}
+        </div>"""
+        if featured
+        else """<div id="featured-video" class="placeholder">
+          <p>No videos yet. Your next finished storyboard will appear here.</p>
+        </div>"""
+    )
     content = f"""
     <section class="hero">
       <div class="eyebrow">Your AI product demo team</div>
@@ -167,6 +258,10 @@ def landing_page() -> str:
       <li><span><strong>Narrate</strong> Each step can explain the product story in a natural voice.</span></li>
       <li><span><strong>Render</strong> reel-studio produces a downloadable MP4 with audio and screen capture.</span></li>
     </ol>
+    <h2>Latest from the theater</h2>
+    {featured_content}
+    <p><a class="button secondary" href="/theater">See all videos →</a></p>
+    {video_refresh_script("featured-video", featured=True)}
     <h2>Connect your agent</h2>
     <p class="endpoint">MCP endpoint: <code>{endpoint}</code></p>
     <!-- Example placeholder: Bearer <YOUR_TOKEN> -->
@@ -176,6 +271,27 @@ def landing_page() -> str:
     placeholder. Never commit or share the real token.</p>
     """
     return page_shell("Autonomous product demos", content)
+
+
+def theater_page() -> str:
+    """Render the public showcase of finished videos."""
+    videos = store.list_finished_sessions()
+    cards = "".join(video_card(video) for video in videos)
+    if not cards:
+        cards = '<div class="placeholder" data-empty><p>No finished videos yet. Check back soon.</p></div>'
+    content = f"""
+    <section class="hero" style="padding-bottom: 28px;">
+      <div class="eyebrow">Public showcase</div>
+      <h1>Theater.</h1>
+      <p class="lede">Watch the latest narrated product stories created by
+      reel-studio agents.</p>
+    </section>
+    <div id="theater-videos" class="theater-grid">
+      {cards}
+    </div>
+    {video_refresh_script("theater-videos")}
+    """
+    return page_shell("Public video theater", content)
 
 
 def docs_page() -> str:
@@ -233,11 +349,12 @@ def docs_page() -> str:
     controls precisely. When the story lands, call <code>finish</code> to get
     the MP4 and its download URL.</p>
     <h2>Auth and video delivery</h2>
-    <p>Every MCP and video request uses
+    <p>MCP requests use
     <code>Authorization: Bearer &lt;REEL_API_TOKEN&gt;</code>. The token is
     configured with the server's <code>REEL_API_TOKEN</code> environment
-    variable. After <code>finish</code>, fetch the token-protected
-    <code>video_url</code> to download the rendered MP4.</p>
+    variable. Finished videos are public by default: browse
+    <a href="/theater">/theater</a>, query <code>/api/videos</code>, or play
+    the relative <code>video_url</code> directly without a token.</p>
     <p><a href="/">← Back to the reel-studio overview</a></p>
     """
     return page_shell("MCP and API docs", content)
@@ -259,6 +376,29 @@ async def docs(request: Request) -> Response:
 async def health(request: Request) -> Response:
     """Return a lightweight service health response."""
     return JSONResponse({"status": "ok"})
+
+
+@mcp.custom_route("/theater", methods=["GET"], include_in_schema=False)
+async def theater(request: Request) -> Response:
+    """Serve the public finished-video showcase."""
+    return HTMLResponse(theater_page())
+
+
+@mcp.custom_route("/api/videos", methods=["GET"], include_in_schema=False)
+async def videos_api(request: Request) -> Response:
+    """Return finished videos for public theater refreshes."""
+    return JSONResponse(
+        [
+            {
+                "id": video["id"],
+                "start_url": video["start_url"],
+                "title": video["start_url"],
+                "duration_seconds": video["duration_seconds"],
+                "finished_at": video["finished_at"],
+            }
+            for video in store.list_finished_sessions()
+        ]
+    )
 
 
 @mcp.tool()
@@ -382,7 +522,7 @@ async def download_video(request: Request) -> Response:
     video_path = output_root() / session_id / "video.mp4"
     if not video_path.is_file():
         return JSONResponse({"detail": "Video not found"}, status_code=404)
-    return FileResponse(video_path, media_type="video/mp4", filename="video.mp4")
+    return FileResponse(video_path, media_type="video/mp4")
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
@@ -393,7 +533,11 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self.token = token
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        if request.method == "GET" and request.url.path in {"/", "/docs", "/health"}:
+        public_video = re.fullmatch(r"/videos/[^/]+/video\.mp4", request.url.path)
+        if request.method == "GET" and (
+            request.url.path in {"/", "/docs", "/health", "/theater", "/api/videos"}
+            or public_video
+        ):
             return await call_next(request)
         authorization = request.headers.get("authorization", "")
         scheme, _, supplied_token = authorization.partition(" ")
