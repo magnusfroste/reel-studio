@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "video-director"
+name = "reel-studio"
 version = "0.1.0"
 description = "MCP server for directing narrated browser screen recordings"
 requires-python = ">=3.10"
@@ -15,4 +15,4 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["video_director*"]
+include = ["reel_studio*"]

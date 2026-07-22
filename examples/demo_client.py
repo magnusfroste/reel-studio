@@ -13,7 +13,7 @@ async def main() -> None:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     server = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "video_director.server"],
+        args=["-m", "reel_studio.server"],
         cwd=root,
     )
     async with stdio_client(server) as (read, write):

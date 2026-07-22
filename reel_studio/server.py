@@ -6,7 +6,7 @@ from .engine import BrowserSession
 from .schema import Action
 
 
-mcp = FastMCP("video-director")
+mcp = FastMCP("reel-studio")
 sessions: dict[str, BrowserSession] = {}
 
 

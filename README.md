@@ -1,6 +1,6 @@
-# video-director
+# reel-studio
 
-`video-director` is an MCP server that lets an AI agent direct a narrated
+`reel-studio` is an MCP server that lets an AI agent direct a narrated
 screen recording of a web app. It launches headed Chromium on Xvfb, records
 the display with ffmpeg/x11grab, and renders delayed Edge TTS narration into
 the final MP4.
@@ -18,7 +18,7 @@ System packages `Xvfb` and `ffmpeg` are required.
 ## Run
 
 ```bash
-.venv/bin/python -m video_director.server
+.venv/bin/python -m reel_studio.server
 ```
 
 The server uses MCP stdio. Example Claude Desktop / MCP config:
@@ -26,9 +26,9 @@ The server uses MCP stdio. Example Claude Desktop / MCP config:
 ```json
 {
   "mcpServers": {
-    "video-director": {
+    "reel-studio": {
       "command": "/home/ubuntu/repos/video-director/.venv/bin/python",
-      "args": ["-m", "video_director.server"],
+      "args": ["-m", "reel_studio.server"],
       "cwd": "/home/ubuntu/repos/video-director"
     }
   }
