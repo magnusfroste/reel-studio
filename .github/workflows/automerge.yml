@@ -1,0 +1,36 @@
+name: Auto-merge
+
+on:
+  pull_request:
+    types: [opened, labeled, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install package
+        run: pip install -e .
+      - name: Import and compile package
+        run: |
+          python -c "import reel_studio.server, reel_studio.engine, reel_studio.render, reel_studio.tts, reel_studio.schema"
+          python -m compileall reel_studio
+
+  merge:
+    needs: check
+    if: contains(github.event.pull_request.labels.*.name, 'auto-merge')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge "${{ github.event.pull_request.number }}" --squash --delete-branch
