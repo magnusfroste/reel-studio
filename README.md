@@ -27,6 +27,8 @@ The server uses MCP stdio by default. For HTTP mode:
 REEL_TRANSPORT=http \
 REEL_API_TOKEN=replace-with-a-long-random-token \
 REEL_PUBLIC_BASE_URL=https://reel.example.com \
+# Optional comma-separated extra hostnames:
+# REEL_ALLOWED_HOSTS=internal.example.com,another.example.com \
 .venv/bin/python -m reel_studio.server
 ```
 
@@ -34,7 +36,9 @@ HTTP serves MCP at `/mcp` and finished videos at
 `/videos/{session_id}/video.mp4`. Every HTTP request requires
 `Authorization: Bearer <REEL_API_TOKEN>`. `REEL_OUTPUT_DIR` defaults to
 `/home/ubuntu/.video-director/sessions`; set it to a persistent volume path
-such as `/data` in a container. Example Claude Desktop / MCP config for local
+such as `/data` in a container. The public host is automatically allowed from
+`REEL_PUBLIC_BASE_URL`; use optional comma-separated `REEL_ALLOWED_HOSTS` for
+additional deployment hostnames. Example Claude Desktop / MCP config for local
 stdio:
 
 ```json
