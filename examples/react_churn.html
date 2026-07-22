@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>React churn ref test</title>
+</head>
+<body>
+  <main id="app"></main>
+  <p id="status">Not clicked</p>
+  <script>
+    const app = document.getElementById("app");
+    const status = document.getElementById("status");
+
+    function render(value = "") {
+      app.innerHTML = `
+        <input aria-label="Churn input" value="${value}">
+        <button type="button">Click after churn</button>
+      `;
+      app.querySelector("input").addEventListener("input", (event) => {
+        render(event.target.value);
+      });
+      app.querySelector("button").addEventListener("click", () => {
+        status.textContent = "Clicked after churn";
+      });
+    }
+
+    render();
+  </script>
+</body>
+</html>
