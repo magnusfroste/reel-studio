@@ -2,12 +2,15 @@
 
 import hmac
 import html
+import json
 import os
 import re
 from urllib.parse import urlparse
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import CallToolResult, TextContent
+from pydantic import ValidationError
 import uvicorn
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -65,6 +68,16 @@ def transport_security_from_env() -> TransportSecuritySettings:
 
 mcp = FastMCP("reel-studio", transport_security=transport_security_from_env())
 sessions: dict[str, BrowserSession] = {}
+
+
+def feedback_result(payload: dict, screenshot: object = None) -> CallToolResult:
+    """Return structured JSON plus an MCP image when one is available."""
+    content: list[object] = [
+        TextContent(type="text", text=json.dumps(payload)),
+    ]
+    if screenshot:
+        content.append(Image(path=screenshot).to_image_content())
+    return CallToolResult(content=content, structuredContent=payload)
 
 
 PAGE_STYLES = """
@@ -181,17 +194,25 @@ def docs_page() -> str:
       1280, height to 720, and voice to <code>en-US-JennyNeural</code>.</p></div>
     <div class="tool card"><h3><code>observe(session_id)</code></h3>
       <p>Capture the current screen and discover interactive elements.</p>
-      <p><strong>Returns:</strong> <code>{{"screenshot_path", "url", "title", "elements":[]}}</code>.
+      <p><strong>Returns:</strong> <code>{{"screenshot_path", "url", "title",
+      "elements":[], "refs_stale": false}}</code> plus a viewable image.
       Each element includes a stable <code>ref</code>, role, text, and bounding box.</p></div>
     <div class="tool card"><h3><code>act(session_id, action, narration?)</code></h3>
       <p>Perform one browser action. Add optional narration to hold the moment
       on screen while its voice clip is scheduled.</p>
-      <p><strong>Returns:</strong> <code>{{"ok", "offset_seconds"}}</code>.</p>
+      <p><strong>Returns:</strong> <code>{{"ok", "offset_seconds", "url",
+      "title", "changed", "narration_duration", "padding_applied",
+      "refs_stale"}}</code> plus a viewable image. In-flow failures return
+      <code>{{"ok": false, "error": {{"type", "message"}}}}</code> and a
+      current image when possible. Re-observe when <code>refs_stale</code> is true.</p>
       <p><strong>Actions:</strong>
       <code>goto{{url}}</code>, <code>click{{ref}}</code>,
       <code>type{{ref,text}}</code>, <code>scroll{{dy}}</code>,
       <code>hover{{ref}}</code>, <code>highlight{{ref}}</code>, and
       <code>wait{{ms}}</code>. Refs come from <code>observe</code>.</p></div>
+    <div class="tool card"><h3><code>get_status(session_id)</code></h3>
+      <p>Returns elapsed seconds, recorded step count, total narrated seconds,
+      and estimated final video length.</p></div>
     <div class="tool card"><h3><code>finish(session_id)</code></h3>
       <p>Stop recording, mix narration, and render the final MP4.</p>
       <p><strong>Returns:</strong> <code>{{"video_path", "video_url"}}</code>.
@@ -243,15 +264,29 @@ async def start_session(
 
 
 @mcp.tool()
-async def observe(session_id: str) -> dict:
+async def observe(session_id: str) -> CallToolResult:
     """Capture the current browser UI and its interactive elements."""
-    return await sessions[session_id].observe()
+    payload, screenshot = await sessions[session_id].observe()
+    return feedback_result(payload, screenshot)
 
 
 @mcp.tool()
-async def act(session_id: str, action: dict, narration: str = "") -> dict:
+async def act(session_id: str, action: dict, narration: str = "") -> CallToolResult:
     """Perform exactly one browser action, optionally narrating it."""
-    return await sessions[session_id].act(Action.model_validate(action), narration)
+    session = sessions[session_id]
+    try:
+        parsed_action = Action.model_validate(action)
+    except ValidationError as exc:
+        payload, screenshot = await session.error_result("invalid_action", str(exc))
+        return feedback_result(payload, screenshot)
+    payload, screenshot = await session.act(parsed_action, narration)
+    return feedback_result(payload, screenshot)
+
+
+@mcp.tool()
+async def get_status(session_id: str) -> dict:
+    """Return recording progress and an estimated final video length."""
+    return sessions[session_id].status()
 
 
 @mcp.tool()
