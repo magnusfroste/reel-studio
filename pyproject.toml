@@ -12,6 +12,7 @@ dependencies = [
   "playwright",
   "edge-tts",
   "pydantic>=2",
+  "uvicorn",
 ]
 
 [tool.setuptools.packages.find]

@@ -15,7 +15,11 @@ from .schema import Action
 from .tts import synthesize
 
 
-ROOT = Path("/home/ubuntu/.video-director/sessions")
+DEFAULT_OUTPUT_DIR = Path("/home/ubuntu/.video-director/sessions")
+
+
+def output_root() -> Path:
+    return Path(os.environ.get("REEL_OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR))).expanduser()
 
 
 def _free_display() -> int:
@@ -47,7 +51,7 @@ class BrowserSession:
     @classmethod
     async def create(cls, start_url: str, width: int, height: int, voice: str) -> "BrowserSession":
         session_id = uuid.uuid4().hex
-        directory = ROOT / session_id
+        directory = output_root() / session_id
         directory.mkdir(parents=True, exist_ok=True)
         display_number = _free_display()
         display = f":{display_number}"
