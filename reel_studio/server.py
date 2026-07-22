@@ -3,8 +3,10 @@
 import hmac
 import os
 import re
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 import uvicorn
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -15,7 +17,52 @@ from .engine import BrowserSession, output_root
 from .schema import Action
 
 
-mcp = FastMCP("reel-studio")
+LOCAL_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+LOCAL_ALLOWED_ORIGINS = [
+    "http://127.0.0.1",
+    "http://127.0.0.1:*",
+    "http://localhost",
+    "http://localhost:*",
+    "http://[::1]",
+    "http://[::1]:*",
+]
+
+
+def transport_security_from_env() -> TransportSecuritySettings:
+    """Build DNS-rebinding protection settings for local and public hosts."""
+    allowed_hosts = list(LOCAL_ALLOWED_HOSTS)
+    allowed_origins = list(LOCAL_ALLOWED_ORIGINS)
+    configured = False
+
+    public_base_url = os.environ.get("REEL_PUBLIC_BASE_URL", "").strip()
+    if public_base_url:
+        parsed = urlparse(public_base_url)
+        if parsed.scheme and parsed.netloc and parsed.hostname:
+            configured = True
+            hostname = parsed.hostname
+            host_pattern = f"[{hostname}]:*" if ":" in hostname else f"{hostname}:*"
+            allowed_hosts.extend([parsed.netloc, host_pattern])
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            origin_pattern = f"{parsed.scheme}://{host_pattern.removesuffix(':*')}:*"
+            allowed_origins.extend([origin, origin_pattern])
+
+    for value in os.environ.get("REEL_ALLOWED_HOSTS", "").split(","):
+        hostname = value.strip()
+        if not hostname:
+            continue
+        configured = True
+        allowed_hosts.extend([hostname, f"{hostname}:*"])
+
+    if not configured:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(dict.fromkeys(allowed_hosts)),
+        allowed_origins=list(dict.fromkeys(allowed_origins)),
+    )
+
+
+mcp = FastMCP("reel-studio", transport_security=transport_security_from_env())
 sessions: dict[str, BrowserSession] = {}
 
 
@@ -95,7 +142,14 @@ def run_http() -> None:
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8000"))
     app = BearerAuthMiddleware(mcp.streamable_http_app(), token)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
 
 
 if __name__ == "__main__":
