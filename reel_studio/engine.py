@@ -53,7 +53,7 @@ class BrowserSession:
     page: Page
     recorder: subprocess.Popen[bytes]
     t0: float
-    refs: dict[str, Locator] = field(default_factory=dict)
+    refs: dict[str, str] = field(default_factory=dict)
     narrations: list[tuple[float, Path, str]] = field(default_factory=list)
     refs_stale: bool = True
 
@@ -97,6 +97,24 @@ class BrowserSession:
         await self.page.screenshot(path=str(screenshot), type="jpeg", quality=80)
         return screenshot
 
+    async def _stable_selector(self, item: Locator) -> str:
+        return await item.evaluate(
+            """(el) => {
+                const parts = [];
+                while (el && el.nodeType === 1 && el !== document.body) {
+                    let index = 1;
+                    let sibling = el.previousElementSibling;
+                    while (sibling) {
+                        if (sibling.tagName === el.tagName) index += 1;
+                        sibling = sibling.previousElementSibling;
+                    }
+                    parts.unshift(`${el.tagName.toLowerCase()}:nth-of-type(${index})`);
+                    el = el.parentElement;
+                }
+                return parts.join(" > ");
+            }"""
+        )
+
     async def observe(self) -> tuple[dict, Path]:
         screenshot = await self.capture_screenshot()
         self.refs.clear()
@@ -108,7 +126,7 @@ class BrowserSession:
             if not await item.is_visible():
                 continue
             ref = f"e{index}"
-            self.refs[ref] = item
+            self.refs[ref] = await self._stable_selector(item)
             box = await item.bounding_box()
             role = await item.get_attribute("role") or (await item.evaluate(
                 "(el) => el.tagName.toLowerCase()"
@@ -168,7 +186,13 @@ class BrowserSession:
                     return await self.error_result(
                         "unknown_ref", f"Unknown element ref: {action.ref}"
                     )
-                target = self.refs[action.ref]
+                target = self.page.locator(self.refs[action.ref])
+                if await target.count() == 0:
+                    return await self.error_result(
+                        "unknown_ref", f"Element ref no longer matches: {action.ref}"
+                    )
+                target = target.first
+                await target.wait_for(state="visible", timeout=5000)
                 await target.scroll_into_view_if_needed(timeout=5000)
                 if action_type == "click":
                     await target.click()
@@ -190,7 +214,7 @@ class BrowserSession:
                 await self.page.mouse.wheel(0, action.dy)
             elif action_type == "wait":
                 await self.page.wait_for_timeout(action.ms)
-            if action_type in {"goto", "click", "type", "scroll"}:
+            if self.page.url != before_url:
                 self.refs_stale = True
             try:
                 await self.page.wait_for_load_state("domcontentloaded", timeout=2000)
@@ -198,8 +222,12 @@ class BrowserSession:
                 pass
             await self.page.wait_for_timeout(250)
         except PlaywrightTimeoutError as exc:
+            if self.page.url != before_url:
+                self.refs_stale = True
             return await self.error_result("timeout", str(exc))
         except (PlaywrightError, ValueError) as exc:
+            if self.page.url != before_url:
+                self.refs_stale = True
             return await self.error_result("action_failed", str(exc))
         if clip:
             self.narrations.append((offset, clip, narration))
