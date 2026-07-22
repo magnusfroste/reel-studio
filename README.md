@@ -67,3 +67,8 @@ For a remote MCP client, connect to
 `https://reel.example.com/mcp` using the streamable HTTP transport and send
 `Authorization: Bearer <REEL_API_TOKEN>` on each request. `finish` returns both
 the local `video_path` and a downloadable `video_url`.
+
+## Auto-merge
+
+Label a pull request `auto-merge` and it will be merged automatically once the
+workflow's package import and compile checks pass.
