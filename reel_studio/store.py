@@ -79,6 +79,7 @@ def create_session(
     height: int,
     output_dir: str,
 ) -> None:
+    init_schema()
     with _lock, _connect() as connection:
         connection.execute(
             """
@@ -103,6 +104,7 @@ def append_step(
     ok: bool,
     error_type: str | None,
 ) -> None:
+    init_schema()
     with _lock, _connect() as connection:
         next_idx = connection.execute(
             "SELECT COALESCE(MAX(idx) + 1, 0) FROM steps WHERE session_id = ?",
@@ -140,6 +142,7 @@ def finish_session(
     video_url: str | None,
     duration_seconds: float,
 ) -> None:
+    init_schema()
     with _lock, _connect() as connection:
         connection.execute(
             """
@@ -154,6 +157,7 @@ def finish_session(
 
 def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 100))
+    init_schema()
     with _lock, _connect() as connection:
         rows = connection.execute(
             """
@@ -170,6 +174,7 @@ def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def get_session(session_id: str) -> dict[str, Any] | None:
+    init_schema()
     with _lock, _connect() as connection:
         session = connection.execute(
             "SELECT * FROM sessions WHERE id = ?", (session_id,)
@@ -200,6 +205,3 @@ def get_status(session_id: str) -> dict[str, Any] | None:
         "status": session["status"],
         "stale": session["status"] == "active",
     }
-
-
-init_schema()

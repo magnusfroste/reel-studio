@@ -427,6 +427,7 @@ def run_http() -> None:
 if __name__ == "__main__":
     transport = os.environ.get("REEL_TRANSPORT", "stdio").lower()
     if transport == "stdio":
+        store.init_schema()
         mcp.run()
     elif transport == "http":
         run_http()
