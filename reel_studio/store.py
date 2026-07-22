@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
+import uuid
 
 from .engine import output_root
 
@@ -67,6 +68,18 @@ def init_schema() -> None:
             );
             CREATE INDEX IF NOT EXISTS steps_session_idx
                 ON steps (session_id, idx);
+            CREATE TABLE IF NOT EXISTS backlog (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                category TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                session_id TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS backlog_created_idx
+                ON backlog (created_at DESC);
             """
         )
 
@@ -183,6 +196,67 @@ def list_finished_sessions() -> list[dict[str, Any]]:
             WHERE status = 'finished'
             ORDER BY finished_at DESC, created_at DESC
             """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_backlog(
+    title: str,
+    detail: str,
+    category: str,
+    severity: str,
+    session_id: str | None,
+) -> dict[str, Any]:
+    init_schema()
+    item = {
+        "id": uuid.uuid4().hex,
+        "title": title,
+        "detail": detail,
+        "category": category,
+        "severity": severity,
+        "session_id": session_id,
+        "status": "open",
+        "created_at": _now(),
+    }
+    with _lock, _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO backlog
+                (id, title, detail, category, severity, session_id, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            tuple(item.values()),
+        )
+    return item
+
+
+def list_backlog(
+    limit: int = 50,
+    status: str | None = None,
+    category: str | None = None,
+) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 100))
+    init_schema()
+    with _lock, _connect() as connection:
+        clauses = []
+        parameters: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            parameters.append(status)
+        if category:
+            clauses.append("category = ?")
+            parameters.append(category)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        parameters.append(limit)
+        rows = connection.execute(
+            f"""
+            SELECT id, title, detail, category, severity, session_id, status, created_at
+            FROM backlog
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            parameters,
         ).fetchall()
     return [dict(row) for row in rows]
 
