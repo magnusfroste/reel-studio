@@ -34,7 +34,7 @@ REEL_PUBLIC_BASE_URL=https://reel.example.com \
 
 HTTP serves a public marketing landing page at `/`, detailed API docs at
 `/docs`, a public JSON health check at `/health`, MCP at `/mcp`, and finished videos at
-`/videos/{session_id}/video.mp4`. Every HTTP request requires
+`/videos/{session_id}/video.mp4`. MCP and video requests require
 `Authorization: Bearer <REEL_API_TOKEN>`. `REEL_OUTPUT_DIR` defaults to
 `/home/ubuntu/.video-director/sessions`; set it to a persistent volume path
 such as `/data` in a container. The public host is automatically allowed from
@@ -54,10 +54,12 @@ stdio:
 }
 ```
 
-Tools are `start_session`, `observe`, `act`, and `finish`. `act` accepts
-`goto`, `click`, `type`, `scroll`, `hover`, `highlight`, and `wait` actions.
-The scripted `examples/demo_client.py` runs a complete smoke test against
-`https://example.com`.
+Tools are `start_session`, `observe`, `act`, `finish`, and `get_status`.
+`observe` and `act` return structured feedback plus a viewable screenshot
+image; `act` accepts `goto`, `click`, `type`, `scroll`, `hover`, `highlight`,
+and `wait` actions. Re-observe after navigation or DOM changes to refresh
+element refs. The scripted `examples/demo_client.py` runs a complete smoke
+test against `https://example.com`.
 
 ## Deploy on EasyPanel/Hetzner
 
