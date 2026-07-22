@@ -121,6 +121,9 @@ PAGE_STYLES = """
     .video-card-body { padding: 18px; }
     .video-card h3 { overflow-wrap: anywhere; }
     .placeholder { border: 1px dashed #405070; border-radius: 14px; padding: 28px; text-align: center; }
+    .backlog-item { position: relative; }
+    .badges { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0; }
+    .badge { background: #263453; border-radius: 999px; color: #dbe2ff; font-size: .8rem; padding: 4px 9px; }
 """
 
 
@@ -136,7 +139,7 @@ def page_shell(title: str, content: str) -> str:
 </head>
 <body>
   <main>
-    <nav><strong>reel-studio</strong><span><a href="/">Home</a> · <a href="/theater">Theater</a> · <a href="/docs">Docs</a></span></nav>
+    <nav><strong>reel-studio</strong><span><a href="/">Home</a> · <a href="/theater">Theater</a> · <a href="/backlog">Backlog</a> · <a href="/bug_report">Bug reports</a> · <a href="/docs">Docs</a></span></nav>
     {content}
   </main>
 </body>
@@ -294,6 +297,66 @@ def theater_page() -> str:
     return page_shell("Public video theater", content)
 
 
+def backlog_item(item: dict) -> str:
+    title = html.escape(item["title"])
+    detail = html.escape(item["detail"])
+    category = html.escape(item["category"])
+    severity = html.escape(item["severity"])
+    status = html.escape(item["status"])
+    created_at = html.escape(item["created_at"])
+    return f"""
+    <article class="backlog-item card" data-backlog-id="{html.escape(item["id"], quote=True)}">
+      <h3>{title}</h3>
+      <div class="badges">
+        <span class="badge">{category}</span>
+        <span class="badge">{severity} severity</span>
+        <span class="badge">{status}</span>
+      </div>
+      <p>{detail or '<span class="muted">No additional detail.</span>'}</p>
+      <p class="muted">{created_at}</p>
+    </article>"""
+
+
+def backlog_page() -> str:
+    """Render the public agent-improvement roadmap."""
+    items = store.list_backlog()
+    cards = "".join(backlog_item(item) for item in items)
+    if not cards:
+        cards = '<div class="placeholder"><p>No backlog items yet. Agents can submit the next improvement through MCP.</p></div>'
+    content = f"""
+    <section class="hero" style="padding-bottom: 28px;">
+      <div class="eyebrow">Open-source roadmap</div>
+      <h1>Agent backlog.</h1>
+      <p class="lede">A public list of the improvements agents ask for while
+      directing real product stories.</p>
+    </section>
+    <div class="theater-grid">
+      {cards}
+    </div>
+    """
+    return page_shell("Agent backlog", content)
+
+
+def bug_report_page() -> str:
+    """Render the public bug-report roadmap."""
+    items = store.list_backlog(category="bug")
+    cards = "".join(backlog_item(item) for item in items)
+    if not cards:
+        cards = '<div class="placeholder"><p>No bug reports yet. Agents can submit one through MCP.</p></div>'
+    content = f"""
+    <section class="hero" style="padding-bottom: 28px;">
+      <div class="eyebrow">Open-source bug reports</div>
+      <h1>Bug reports.</h1>
+      <p class="lede">Known product and directing-agent problems submitted from
+      real recording sessions.</p>
+    </section>
+    <div class="theater-grid">
+      {cards}
+    </div>
+    """
+    return page_shell("Public bug reports", content)
+
+
 def docs_page() -> str:
     """Render the detailed MCP and API reference."""
     endpoint = html.escape(mcp_endpoint())
@@ -338,6 +401,19 @@ def docs_page() -> str:
       <p>Returns the stored session row and ordered storyboard steps. Finished
       metadata remains available after a server restart; abandoned active
       sessions are reported as stale and are not resumed.</p></div>
+    <div class="tool card"><h3><code>submit_backlog(title, detail?, category?, severity?, session_id?)</code></h3>
+      <p>Submit a tool-improvement request when the agent hits friction.
+      Categories are <code>feature</code>, <code>bug</code>, or
+      <code>friction</code>; severities are <code>low</code>,
+      <code>normal</code>, or <code>high</code>. Requests are stored in the
+      public roadmap.</p></div>
+    <div class="tool card"><h3><code>list_backlog(limit=50, status?)</code></h3>
+      <p>List recent agent backlog requests, optionally filtered by status.
+      The public roadmap is available at <a href="/backlog">/backlog</a> and
+      its JSON feed at <code>/api/backlog</code>.</p></div>
+    <p>Bug-category requests are also collected at the public
+    <a href="/bug_report">/bug_report</a> page and
+    <code>/api/bug_reports</code> feed.</p>
     <div class="tool card"><h3><code>finish(session_id)</code></h3>
       <p>Stop recording, mix narration, and render the final MP4.</p>
       <p><strong>Returns:</strong> <code>{{"video_path", "video_url"}}</code>.
@@ -399,6 +475,30 @@ async def videos_api(request: Request) -> Response:
             for video in store.list_finished_sessions()
         ]
     )
+
+
+@mcp.custom_route("/backlog", methods=["GET"], include_in_schema=False)
+async def backlog(request: Request) -> Response:
+    """Serve the public agent-improvement roadmap."""
+    return HTMLResponse(backlog_page())
+
+
+@mcp.custom_route("/api/backlog", methods=["GET"], include_in_schema=False)
+async def backlog_api(request: Request) -> Response:
+    """Return public backlog items as JSON."""
+    return JSONResponse(store.list_backlog())
+
+
+@mcp.custom_route("/bug_report", methods=["GET"], include_in_schema=False)
+async def bug_report(request: Request) -> Response:
+    """Serve the public bug-report roadmap."""
+    return HTMLResponse(bug_report_page())
+
+
+@mcp.custom_route("/api/bug_reports", methods=["GET"], include_in_schema=False)
+async def bug_reports_api(request: Request) -> Response:
+    """Return public bug-category backlog items as JSON."""
+    return JSONResponse(store.list_backlog(category="bug"))
 
 
 @mcp.tool()
@@ -494,6 +594,39 @@ async def get_session(session_id: str) -> dict:
 
 
 @mcp.tool()
+async def submit_backlog(
+    title: str,
+    detail: str = "",
+    category: str = "feature",
+    severity: str = "normal",
+    session_id: str | None = None,
+) -> dict:
+    """Submit an agent tool-improvement request to the public backlog."""
+    title = title.strip()
+    if not title:
+        raise ValueError("title must not be empty")
+    category = category.strip().lower()
+    if category not in {"feature", "bug", "friction"}:
+        category = "feature"
+    severity = severity.strip().lower()
+    if severity not in {"low", "normal", "high"}:
+        severity = "normal"
+    return store.create_backlog(
+        title,
+        detail.strip(),
+        category,
+        severity,
+        session_id,
+    )
+
+
+@mcp.tool()
+async def list_backlog(limit: int = 50, status: str | None = None) -> list[dict]:
+    """List agent backlog requests from durable metadata."""
+    return store.list_backlog(limit, status.strip().lower() if status else None)
+
+
+@mcp.tool()
 async def finish(session_id: str) -> dict:
     """Stop recording and render the final MP4."""
     session = sessions.pop(session_id)
@@ -535,7 +668,17 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         public_video = re.fullmatch(r"/videos/[^/]+/video\.mp4", request.url.path)
         if request.method == "GET" and (
-            request.url.path in {"/", "/docs", "/health", "/theater", "/api/videos"}
+            request.url.path in {
+                "/",
+                "/docs",
+                "/health",
+                "/theater",
+                "/api/videos",
+                "/backlog",
+                "/api/backlog",
+                "/bug_report",
+                "/api/bug_reports",
+            }
             or public_video
         ):
             return await call_next(request)
