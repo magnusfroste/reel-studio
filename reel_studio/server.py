@@ -1,6 +1,7 @@
 """FastMCP entry point for Reel Studio."""
 
 import hmac
+import html
 import os
 import re
 from urllib.parse import urlparse
@@ -66,72 +67,162 @@ mcp = FastMCP("reel-studio", transport_security=transport_security_from_env())
 sessions: dict[str, BrowserSession] = {}
 
 
-def landing_page() -> str:
-    """Render the public HTTP landing page without exposing credentials."""
-    public_base_url = os.environ.get("REEL_PUBLIC_BASE_URL", "").rstrip("/")
-    mcp_endpoint = f"{public_base_url}/mcp" if public_base_url else "/mcp"
+PAGE_STYLES = """
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0d111a; color: #edf1f7; }
+    main { max-width: 1020px; margin: 0 auto; padding: 34px 24px 88px; }
+    nav { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+    nav strong { color: #fff; letter-spacing: -.02em; }
+    nav a, a { color: #9eb1ff; text-decoration: none; }
+    nav a:hover, a:hover { text-decoration: underline; }
+    .eyebrow { color: #8ea7ff; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .hero { max-width: 820px; padding: 112px 0 72px; }
+    h1 { font-size: clamp(2.9rem, 8vw, 6.5rem); letter-spacing: -.06em; line-height: .94; margin: 16px 0 28px; }
+    h2 { color: #d4dcff; font-size: 1.8rem; margin: 54px 0 18px; }
+    h3 { color: #fff; margin: 0 0 10px; }
+    p, li { color: #b9c1d2; font-size: 1.05rem; line-height: 1.65; }
+    .lede { font-size: 1.25rem; max-width: 680px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+    .button { background: #8ea7ff; border-radius: 9px; color: #10131a; display: inline-block; font-weight: 750; padding: 12px 18px; }
+    .button:hover { background: #b8c6ff; text-decoration: none; }
+    .button.secondary { background: #1b2438; color: #dbe2ff; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+    .card, .endpoint { background: #151b28; border: 1px solid #2a354d; border-radius: 14px; padding: 20px; }
+    .card p { margin: 0; }
+    .steps { counter-reset: step; list-style: none; padding: 0; }
+    .steps li { counter-increment: step; display: flex; gap: 14px; margin: 15px 0; }
+    .steps li::before { content: counter(step); background: #7188ff; border-radius: 50%; color: #10131a; flex: 0 0 28px; font-weight: 800; height: 28px; line-height: 28px; text-align: center; }
+    code, pre { background: #1b2130; border: 1px solid #303a52; border-radius: 10px; }
+    code { padding: 2px 6px; color: #d5ddff; }
+    pre { overflow-x: auto; padding: 18px; color: #d5ddff; }
+    .endpoint { border-left: 3px solid #7188ff; border-radius: 0 12px 12px 0; }
+    .tool { margin: 18px 0; }
+    .tool code { color: #fff; font-size: 1rem; }
+    .muted { color: #8490a8; }
+"""
+
+
+def page_shell(title: str, content: str) -> str:
+    """Wrap public page content in the shared landing/docs layout."""
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>reel-studio · narrated web app videos</title>
-  <style>
-    :root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }}
-    body {{ margin: 0; background: #10131a; color: #edf1f7; }}
-    main {{ max-width: 860px; margin: 0 auto; padding: 64px 24px 80px; }}
-    .eyebrow {{ color: #8ea7ff; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }}
-    h1 {{ font-size: clamp(2.5rem, 8vw, 5rem); line-height: .98; margin: 16px 0 24px; }}
-    h2 {{ margin-top: 48px; color: #cbd5ff; }}
-    p, li {{ color: #b9c1d2; font-size: 1.05rem; line-height: 1.65; }}
-    code, pre {{ background: #1b2130; border: 1px solid #303a52; border-radius: 10px; }}
-    code {{ padding: 2px 6px; color: #d5ddff; }}
-    pre {{ overflow-x: auto; padding: 18px; color: #d5ddff; }}
-    a {{ color: #9eb1ff; }}
-    .tools {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; padding: 0; list-style: none; }}
-    .tools li {{ background: #171c27; border: 1px solid #2a3348; border-radius: 12px; padding: 16px; }}
-    .tools strong {{ display: block; color: #edf1f7; margin-bottom: 6px; }}
-    .endpoint {{ border-left: 3px solid #7188ff; padding: 12px 16px; background: #171c27; }}
-  </style>
+  <title>{title} · reel-studio</title>
+  <style>{PAGE_STYLES}</style>
 </head>
 <body>
   <main>
-    <div class="eyebrow">reel-studio</div>
-    <h1>Direct narrated videos of any web app.</h1>
-    <p>reel-studio is an MCP server that lets an AI agent observe a web app,
-    perform browser actions one at a time, narrate each step, and render the
-    result as a downloadable screen-recording video.</p>
-
-    <h2>How it works</h2>
-    <p>The agent starts a headed Chromium session, observes the current UI,
-    directs individual actions with optional narration, then finishes to get
-    an MP4 with the narration mixed into the recording.</p>
-
-    <h2>MCP tools</h2>
-    <ul class="tools">
-      <li><strong>start_session</strong>Launch a browser and begin recording.</li>
-      <li><strong>observe</strong>Capture a screenshot and interactive element refs.</li>
-      <li><strong>act</strong>Perform one browser action with optional narration.</li>
-      <li><strong>finish</strong>Render the MP4 and return its path and URL.</li>
-    </ul>
-
-    <h2>Connect from Claude Code</h2>
-    <p class="endpoint">MCP endpoint: <code>{mcp_endpoint}</code></p>
-    <!-- Example placeholder: Bearer <YOUR_TOKEN> -->
-    <pre><code>claude mcp add --transport http reel-studio {mcp_endpoint} \
-  --header "Authorization: Bearer &lt;YOUR_TOKEN&gt;"</code></pre>
-    <p>The placeholder is the server's <code>REEL_API_TOKEN</code> environment
-    variable. Never commit or share the real token.</p>
-    <p><a href="https://github.com/magnusfroste/reel-studio">View reel-studio on GitHub</a></p>
+    <nav><strong>reel-studio</strong><span><a href="/">Home</a> · <a href="/docs">Docs</a></span></nav>
+    {content}
   </main>
 </body>
 </html>"""
 
 
+def mcp_endpoint() -> str:
+    public_base_url = os.environ.get("REEL_PUBLIC_BASE_URL", "").rstrip("/")
+    return f"{public_base_url}/mcp" if public_base_url else "/mcp"
+
+
+def landing_page() -> str:
+    """Render the marketing landing page without exposing credentials."""
+    endpoint = html.escape(mcp_endpoint())
+    content = f"""
+    <section class="hero">
+      <div class="eyebrow">Your AI product demo team</div>
+      <h1>Give your product a demo it deserves.</h1>
+      <p class="lede">reel-studio lets an AI agent log into your web app and
+      autonomously produce cool, inspiring narrated demo and marketing videos.
+      It is like having an employee who demos your product better than you can.</p>
+      <div class="actions">
+        <a class="button" href="/docs">Read the docs</a>
+        <a class="button secondary" href="https://github.com/magnusfroste/reel-studio">View on GitHub</a>
+      </div>
+    </section>
+    <h2>Turn complex flows into compelling stories</h2>
+    <p>Products with dozens of modules and intricate workflows are painful to
+    record manually. Let an agent explore the UI, follow a storyboard, and
+    turn the moments that matter into a polished narrated walkthrough.</p>
+    <ol class="steps">
+      <li><span><strong>Observe</strong> The agent sees the current page, screenshot, and interactive refs.</span></li>
+      <li><span><strong>Act</strong> It clicks, types, scrolls, hovers, or navigates one deliberate step at a time.</span></li>
+      <li><span><strong>Narrate</strong> Each step can explain the product story in a natural voice.</span></li>
+      <li><span><strong>Render</strong> reel-studio produces a downloadable MP4 with audio and screen capture.</span></li>
+    </ol>
+    <h2>Connect your agent</h2>
+    <p class="endpoint">MCP endpoint: <code>{endpoint}</code></p>
+    <!-- Example placeholder: Bearer <YOUR_TOKEN> -->
+    <pre><code>claude mcp add --transport http reel-studio {endpoint} \
+  --header "Authorization: Bearer &lt;YOUR_TOKEN&gt;"</code></pre>
+    <p class="muted">Use the server's <code>REEL_API_TOKEN</code> as the
+    placeholder. Never commit or share the real token.</p>
+    """
+    return page_shell("Autonomous product demos", content)
+
+
+def docs_page() -> str:
+    """Render the detailed MCP and API reference."""
+    endpoint = html.escape(mcp_endpoint())
+    content = f"""
+    <section class="hero" style="padding-bottom: 28px;">
+      <div class="eyebrow">MCP API reference</div>
+      <h1>Storyboard your product demo.</h1>
+      <p class="lede">An agent like Claude loops through observe → act, adding
+      narration to each step, until the story is complete.</p>
+    </section>
+    <p class="endpoint">MCP endpoint: <code>{endpoint}</code></p>
+    <h2>Tools</h2>
+    <div class="tool card"><h3><code>start_session(start_url, width, height, voice)</code></h3>
+      <p>Launch headed Chromium and begin recording.</p>
+      <p><strong>Returns:</strong> <code>{{"session_id"}}</code>. Width defaults to
+      1280, height to 720, and voice to <code>en-US-JennyNeural</code>.</p></div>
+    <div class="tool card"><h3><code>observe(session_id)</code></h3>
+      <p>Capture the current screen and discover interactive elements.</p>
+      <p><strong>Returns:</strong> <code>{{"screenshot_path", "url", "title", "elements":[]}}</code>.
+      Each element includes a stable <code>ref</code>, role, text, and bounding box.</p></div>
+    <div class="tool card"><h3><code>act(session_id, action, narration?)</code></h3>
+      <p>Perform one browser action. Add optional narration to hold the moment
+      on screen while its voice clip is scheduled.</p>
+      <p><strong>Returns:</strong> <code>{{"ok", "offset_seconds"}}</code>.</p>
+      <p><strong>Actions:</strong>
+      <code>goto{{url}}</code>, <code>click{{ref}}</code>,
+      <code>type{{ref,text}}</code>, <code>scroll{{dy}}</code>,
+      <code>hover{{ref}}</code>, <code>highlight{{ref}}</code>, and
+      <code>wait{{ms}}</code>. Refs come from <code>observe</code>.</p></div>
+    <div class="tool card"><h3><code>finish(session_id)</code></h3>
+      <p>Stop recording, mix narration, and render the final MP4.</p>
+      <p><strong>Returns:</strong> <code>{{"video_path", "video_url"}}</code>.
+      The URL is present when <code>REEL_PUBLIC_BASE_URL</code> is configured.</p></div>
+    <h2>The storyboard workflow</h2>
+    <p>Give the agent a product story, then let it loop: call
+    <code>observe</code>, choose one useful next step, call <code>act</code>
+    with a concise narration, and repeat. Use the returned refs to target
+    controls precisely. When the story lands, call <code>finish</code> to get
+    the MP4 and its download URL.</p>
+    <h2>Auth and video delivery</h2>
+    <p>Every MCP and video request uses
+    <code>Authorization: Bearer &lt;REEL_API_TOKEN&gt;</code>. The token is
+    configured with the server's <code>REEL_API_TOKEN</code> environment
+    variable. After <code>finish</code>, fetch the token-protected
+    <code>video_url</code> to download the rendered MP4.</p>
+    <p><a href="/">← Back to the reel-studio overview</a></p>
+    """
+    return page_shell("MCP and API docs", content)
+
+
 @mcp.custom_route("/", methods=["GET"], include_in_schema=False)
 async def home(request: Request) -> Response:
-    """Serve the public documentation landing page."""
+    """Serve the public marketing landing page."""
     return HTMLResponse(landing_page())
+
+
+@mcp.custom_route("/docs", methods=["GET"], include_in_schema=False)
+async def docs(request: Request) -> Response:
+    """Serve the public MCP and API documentation."""
+    return HTMLResponse(docs_page())
 
 
 @mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
@@ -197,7 +288,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self.token = token
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        if request.method == "GET" and request.url.path in {"/", "/health"}:
+        if request.method == "GET" and request.url.path in {"/", "/docs", "/health"}:
             return await call_next(request)
         authorization = request.headers.get("authorization", "")
         scheme, _, supplied_token = authorization.partition(" ")

@@ -32,8 +32,8 @@ REEL_PUBLIC_BASE_URL=https://reel.example.com \
 .venv/bin/python -m reel_studio.server
 ```
 
-HTTP serves a public landing page at `/`, a public JSON health check at
-`/health`, MCP at `/mcp`, and finished videos at
+HTTP serves a public marketing landing page at `/`, detailed API docs at
+`/docs`, a public JSON health check at `/health`, MCP at `/mcp`, and finished videos at
 `/videos/{session_id}/video.mp4`. Every HTTP request requires
 `Authorization: Bearer <REEL_API_TOKEN>`. `REEL_OUTPUT_DIR` defaults to
 `/home/ubuntu/.video-director/sessions`; set it to a persistent volume path
