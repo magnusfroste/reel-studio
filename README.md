@@ -55,6 +55,8 @@ stdio:
 ```
 
 Tools are `start_session`, `observe`, `act`, `finish`, and `get_status`.
+`list_sessions` and `get_session` read durable SQLite metadata, including
+finished sessions and their storyboard steps after a restart.
 `observe` and `act` return structured feedback plus a viewable screenshot
 image; `act` accepts `goto`, `click`, `type`, `scroll`, `hover`, `highlight`,
 and `wait` actions. Re-observe after navigation or DOM changes to refresh
@@ -64,7 +66,9 @@ test against `https://example.com`.
 ## Deploy on EasyPanel/Hetzner
 
 Build the image with `docker compose build`, then configure
-`REEL_API_TOKEN` and `REEL_PUBLIC_BASE_URL` in EasyPanel. Mount a persistent
+`REEL_API_TOKEN`, `REEL_PUBLIC_BASE_URL`, and optionally `REEL_DB_PATH` in
+EasyPanel. `REEL_DB_PATH` defaults to a SQLite file under the configured output
+root, so it persists when `/data` is mounted. Mount a persistent
 volume at `/data` (for example, the shared
 `/etc/easypanel/projects/reel-studio/data` host path) and expose container port
 `8000`. Point a domain at the service; EasyPanel/Traefik handles TLS. The
