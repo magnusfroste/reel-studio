@@ -58,6 +58,7 @@ def init_schema() -> None:
                 url TEXT,
                 title TEXT,
                 narration_text TEXT,
+                voice TEXT,
                 narration_duration REAL NOT NULL DEFAULT 0,
                 offset_seconds REAL,
                 screenshot_path TEXT,
@@ -82,6 +83,12 @@ def init_schema() -> None:
                 ON backlog (created_at DESC);
             """
         )
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(steps)").fetchall()
+        }
+        if "voice" not in columns:
+            connection.execute("ALTER TABLE steps ADD COLUMN voice TEXT")
 
 
 def create_session(
@@ -116,6 +123,7 @@ def append_step(
     screenshot_path: str | None,
     ok: bool,
     error_type: str | None,
+    voice: str | None = None,
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
@@ -127,9 +135,9 @@ def append_step(
             """
             INSERT INTO steps
                 (session_id, idx, action_type, target, url, title, narration_text,
-                 narration_duration, offset_seconds, screenshot_path, ok, error_type,
-                 created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 voice, narration_duration, offset_seconds, screenshot_path, ok,
+                 error_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -139,6 +147,7 @@ def append_step(
                 url,
                 title,
                 narration_text,
+                voice,
                 narration_duration,
                 offset_seconds,
                 screenshot_path,
@@ -146,6 +155,56 @@ def append_step(
                 error_type,
                 _now(),
             ),
+        )
+
+
+def update_step_narration(
+    session_id: str,
+    index: int,
+    narration: str,
+    voice: str | None = None,
+    narration_duration: float | None = None,
+) -> dict[str, Any] | None:
+    init_schema()
+    with _lock, _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM steps WHERE session_id = ? AND idx = ?",
+            (session_id, index),
+        ).fetchone()
+        if row is None:
+            return None
+        if narration_duration is None:
+            connection.execute(
+                """
+                UPDATE steps
+                SET narration_text = ?, voice = COALESCE(?, voice)
+                WHERE session_id = ? AND idx = ?
+                """,
+                (narration, voice, session_id, index),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE steps
+                SET narration_text = ?, voice = COALESCE(?, voice),
+                    narration_duration = ?
+                WHERE session_id = ? AND idx = ?
+                """,
+                (narration, voice, narration_duration, session_id, index),
+            )
+        updated = connection.execute(
+            "SELECT * FROM steps WHERE session_id = ? AND idx = ?",
+            (session_id, index),
+        ).fetchone()
+    return dict(updated)
+
+
+def update_session_duration(session_id: str, duration_seconds: float) -> None:
+    init_schema()
+    with _lock, _connect() as connection:
+        connection.execute(
+            "UPDATE sessions SET duration_seconds = ? WHERE id = ?",
+            (duration_seconds, session_id),
         )
 
 

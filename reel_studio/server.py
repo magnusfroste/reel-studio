@@ -4,6 +4,7 @@ import hmac
 import html
 import json
 import os
+from pathlib import Path
 import re
 from urllib.parse import urlparse
 
@@ -19,8 +20,9 @@ from starlette.types import ASGIApp
 
 from .engine import BrowserSession, output_root
 from . import store
-from .render import probe_duration
+from .render import probe_duration, rerender_narration
 from .schema import Action
+from .tts import synthesize
 
 
 LOCAL_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -401,6 +403,20 @@ def docs_page() -> str:
       <p>Returns the stored session row and ordered storyboard steps. Finished
       metadata remains available after a server restart; abandoned active
       sessions are reported as stale and are not resumed.</p></div>
+    <div class="tool card"><h3><code>update_step_narration(session_id, index, narration, voice?)</code></h3>
+      <p>Replace the narration text (and optionally the voice) for one step
+      in a finished session. The recorded browser video is not changed.</p>
+      <p><strong>Returns:</strong> <code>{{"ok": true, "step": {{...}}}}</code>,
+      or a structured error for an unknown session, unfinished session, or
+      invalid step index.</p></div>
+    <div class="tool card"><h3><code>rerender(session_id)</code></h3>
+      <p>Re-synthesizes every current step narration at its recorded offset
+      and replaces the audio on the existing video. The browser is not
+      re-recorded and the video URL stays the same.</p>
+      <p><strong>Returns:</strong> <code>{{"ok", "duration", "video_url",
+      "warnings":[]}}</code>. Warnings identify steps whose narration is
+      longer than the available gap; the last frame is held if audio extends
+      past the original video.</p></div>
     <div class="tool card"><h3><code>submit_backlog(title, detail?, category?, severity?, session_id?)</code></h3>
       <p>Submit a tool-improvement request when the agent hits friction.
       Categories are <code>feature</code>, <code>bug</code>, or
@@ -424,6 +440,10 @@ def docs_page() -> str:
     with a concise narration, and repeat. Use the returned refs to target
     controls precisely. When the story lands, call <code>finish</code> to get
     the MP4 and its download URL.</p>
+    <p>To refine a finished story cheaply, call
+    <code>update_step_narration</code> for one or more steps, then call
+    <code>rerender</code>. This rebuilds only the narration track while
+    preserving the recorded browser timeline.</p>
     <h2>Auth and video delivery</h2>
     <p>MCP requests use
     <code>Authorization: Bearer &lt;REEL_API_TOKEN&gt;</code>. The token is
@@ -547,6 +567,7 @@ async def act(session_id: str, action: dict, narration: str = "") -> CallToolRes
             payload.get("screenshot_path"),
             False,
             "invalid_action",
+            session.voice,
         )
         return feedback_result(payload, screenshot)
     payload, screenshot = await session.act(parsed_action, narration)
@@ -562,6 +583,7 @@ async def act(session_id: str, action: dict, narration: str = "") -> CallToolRes
         payload.get("screenshot_path"),
         payload.get("ok", False),
         (payload.get("error") or {}).get("type"),
+        session.voice,
     )
     return feedback_result(payload, screenshot)
 
@@ -591,6 +613,104 @@ async def get_session(session_id: str) -> dict:
     if session is None:
         raise KeyError(f"Unknown session_id: {session_id}")
     return session
+
+
+def _editable_session(session_id: str) -> tuple[dict | None, dict | None]:
+    session = store.get_session(session_id)
+    if session is None:
+        return None, {
+            "ok": False,
+            "error": {
+                "type": "unknown_session",
+                "message": f"Unknown session_id: {session_id}",
+            },
+        }
+    video_path = Path(session["video_path"]) if session.get("video_path") else None
+    if session["status"] != "finished" or video_path is None or not video_path.is_file():
+        return None, {
+            "ok": False,
+            "error": {
+                "type": "session_not_finished",
+                "message": "Narration editing requires a finished session with a video.",
+            },
+        }
+    return session, None
+
+
+@mcp.tool()
+async def update_step_narration(
+    session_id: str,
+    index: int,
+    narration: str,
+    voice: str | None = None,
+) -> dict:
+    """Update one finished session's storyboard narration."""
+    session, error = _editable_session(session_id)
+    if error:
+        return error
+    if index < 0 or index >= len(session["steps"]):
+        return {
+            "ok": False,
+            "error": {
+                "type": "step_not_found",
+                "message": f"Unknown step index: {index}",
+            },
+        }
+    updated = store.update_step_narration(
+        session_id, index, narration.strip(), voice.strip() if voice else None
+    )
+    return {"ok": True, "step": updated}
+
+
+@mcp.tool()
+async def rerender(session_id: str) -> dict:
+    """Rebuild narration audio and mux it onto an existing finished video."""
+    session, error = _editable_session(session_id)
+    if error:
+        return error
+    video_path = Path(session["video_path"])
+    output_dir = video_path.parent
+    clips: list[tuple[float, Path]] = []
+    warnings = []
+    video_duration = probe_duration(video_path)
+    steps = session["steps"]
+    for index, step in enumerate(steps):
+        narration = (step.get("narration_text") or "").strip()
+        offset = step.get("offset_seconds")
+        if not narration or offset is None:
+            continue
+        voice = step.get("voice") or session["voice"]
+        clip = await synthesize(narration, voice, output_dir)
+        duration = probe_duration(clip)
+        store.update_step_narration(
+            session_id, index, narration, voice, narration_duration=duration
+        )
+        clips.append((offset, clip))
+        next_offsets = [
+            following.get("offset_seconds")
+            for following in steps[index + 1:]
+            if following.get("offset_seconds") is not None
+        ]
+        available = (
+            min(next_offsets) - offset
+            if next_offsets
+            else video_duration - offset
+        )
+        if duration > available:
+            warnings.append({
+                "index": index,
+                "needed_seconds": round(duration, 3),
+                "available_seconds": round(max(0, available), 3),
+            })
+    rerender_narration(video_path, clips, video_path)
+    duration = probe_duration(video_path)
+    store.update_session_duration(session_id, duration)
+    return {
+        "ok": True,
+        "duration": round(duration, 3),
+        "video_url": session["video_url"],
+        "warnings": warnings,
+    }
 
 
 @mcp.tool()
