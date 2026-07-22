@@ -1,0 +1,14 @@
+services:
+  reel-studio:
+    build: .
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      REEL_TRANSPORT: http
+      REEL_API_TOKEN: "${REEL_API_TOKEN:?set REEL_API_TOKEN}"
+      REEL_PUBLIC_BASE_URL: "${REEL_PUBLIC_BASE_URL:?set REEL_PUBLIC_BASE_URL}"
+      REEL_OUTPUT_DIR: /data
+      HOST: 0.0.0.0
+      PORT: 8000
+    volumes:
+      - "${REEL_HOST_DATA_DIR:-/etc/easypanel/projects/reel-studio/data}:/data"

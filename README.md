@@ -21,7 +21,21 @@ System packages `Xvfb` and `ffmpeg` are required.
 .venv/bin/python -m reel_studio.server
 ```
 
-The server uses MCP stdio. Example Claude Desktop / MCP config:
+The server uses MCP stdio by default. For HTTP mode:
+
+```bash
+REEL_TRANSPORT=http \
+REEL_API_TOKEN=replace-with-a-long-random-token \
+REEL_PUBLIC_BASE_URL=https://reel.example.com \
+.venv/bin/python -m reel_studio.server
+```
+
+HTTP serves MCP at `/mcp` and finished videos at
+`/videos/{session_id}/video.mp4`. Every HTTP request requires
+`Authorization: Bearer <REEL_API_TOKEN>`. `REEL_OUTPUT_DIR` defaults to
+`/home/ubuntu/.video-director/sessions`; set it to a persistent volume path
+such as `/data` in a container. Example Claude Desktop / MCP config for local
+stdio:
 
 ```json
 {
@@ -39,3 +53,17 @@ Tools are `start_session`, `observe`, `act`, and `finish`. `act` accepts
 `goto`, `click`, `type`, `scroll`, `hover`, `highlight`, and `wait` actions.
 The scripted `examples/demo_client.py` runs a complete smoke test against
 `https://example.com`.
+
+## Deploy on EasyPanel/Hetzner
+
+Build the image with `docker compose build`, then configure
+`REEL_API_TOKEN` and `REEL_PUBLIC_BASE_URL` in EasyPanel. Mount a persistent
+volume at `/data` (for example, the shared
+`/etc/easypanel/projects/reel-studio/data` host path) and expose container port
+`8000`. Point a domain at the service; EasyPanel/Traefik handles TLS. The
+included `docker-compose.yml` documents these settings.
+
+For a remote MCP client, connect to
+`https://reel.example.com/mcp` using the streamable HTTP transport and send
+`Authorization: Bearer <REEL_API_TOKEN>` on each request. `finish` returns both
+the local `video_path` and a downloadable `video_url`.
