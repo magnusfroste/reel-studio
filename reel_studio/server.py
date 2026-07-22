@@ -18,6 +18,8 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.types import ASGIApp
 
 from .engine import BrowserSession, output_root
+from . import store
+from .render import probe_duration
 from .schema import Action
 
 
@@ -213,6 +215,13 @@ def docs_page() -> str:
     <div class="tool card"><h3><code>get_status(session_id)</code></h3>
       <p>Returns elapsed seconds, recorded step count, total narrated seconds,
       and estimated final video length.</p></div>
+    <div class="tool card"><h3><code>list_sessions(limit=20)</code></h3>
+      <p>Lists recent sessions from durable SQLite metadata, including status,
+      step count, duration, and video URL.</p></div>
+    <div class="tool card"><h3><code>get_session(session_id)</code></h3>
+      <p>Returns the stored session row and ordered storyboard steps. Finished
+      metadata remains available after a server restart; abandoned active
+      sessions are reported as stale and are not resumed.</p></div>
     <div class="tool card"><h3><code>finish(session_id)</code></h3>
       <p>Stop recording, mix narration, and render the final MP4.</p>
       <p><strong>Returns:</strong> <code>{{"video_path", "video_url"}}</code>.
@@ -260,6 +269,14 @@ async def start_session(
     """Launch a headed browser and begin recording."""
     session = await BrowserSession.create(start_url, width, height, voice)
     sessions[session.session_id] = session
+    store.create_session(
+        session.session_id,
+        start_url,
+        voice,
+        width,
+        height,
+        str(session.directory),
+    )
     return {"session_id": session.session_id}
 
 
@@ -278,15 +295,62 @@ async def act(session_id: str, action: dict, narration: str = "") -> CallToolRes
         parsed_action = Action.model_validate(action)
     except ValidationError as exc:
         payload, screenshot = await session.error_result("invalid_action", str(exc))
+        store.append_step(
+            session_id,
+            action.get("type") if isinstance(action, dict) else None,
+            action.get("ref") if isinstance(action, dict) else None,
+            payload.get("url"),
+            payload.get("title"),
+            narration,
+            0,
+            payload.get("offset_seconds"),
+            payload.get("screenshot_path"),
+            False,
+            "invalid_action",
+        )
         return feedback_result(payload, screenshot)
     payload, screenshot = await session.act(parsed_action, narration)
+    store.append_step(
+        session_id,
+        parsed_action.type,
+        parsed_action.ref or parsed_action.url,
+        payload.get("url"),
+        payload.get("title"),
+        narration,
+        payload.get("narration_duration", 0),
+        payload.get("offset_seconds"),
+        payload.get("screenshot_path"),
+        payload.get("ok", False),
+        (payload.get("error") or {}).get("type"),
+    )
     return feedback_result(payload, screenshot)
 
 
 @mcp.tool()
 async def get_status(session_id: str) -> dict:
     """Return recording progress and an estimated final video length."""
-    return sessions[session_id].status()
+    session = sessions.get(session_id)
+    if session is not None:
+        return session.status()
+    status = store.get_status(session_id)
+    if status is None:
+        raise KeyError(f"Unknown session_id: {session_id}")
+    return status
+
+
+@mcp.tool()
+async def list_sessions(limit: int = 20) -> list[dict]:
+    """List recent recording sessions from durable metadata."""
+    return store.list_sessions(limit)
+
+
+@mcp.tool()
+async def get_session(session_id: str) -> dict:
+    """Return a durable session and its ordered storyboard steps."""
+    session = store.get_session(session_id)
+    if session is None:
+        raise KeyError(f"Unknown session_id: {session_id}")
+    return session
 
 
 @mcp.tool()
@@ -299,6 +363,12 @@ async def finish(session_id: str) -> dict:
         f"{public_base_url}/videos/{session_id}/video.mp4"
         if public_base_url
         else None
+    )
+    store.finish_session(
+        session_id,
+        str(video_path),
+        video_url,
+        probe_duration(video_path),
     )
     return {"video_path": str(video_path), "video_url": video_url}
 
@@ -357,6 +427,7 @@ def run_http() -> None:
 if __name__ == "__main__":
     transport = os.environ.get("REEL_TRANSPORT", "stdio").lower()
     if transport == "stdio":
+        store.init_schema()
         mcp.run()
     elif transport == "http":
         run_http()
