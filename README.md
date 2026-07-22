@@ -61,11 +61,17 @@ stdio:
 Tools are `start_session`, `observe`, `act`, `finish`, and `get_status`.
 `list_sessions` and `get_session` read durable SQLite metadata, including
 finished sessions and their storyboard steps after a restart.
+For a finished session, `update_step_narration` edits one storyboard
+narration and `rerender` rebuilds only the audio track onto the existing
+recorded video without re-recording the browser. Overlapping narration is
+reported as warnings; audio that exceeds the original timeline extends the
+last video frame.
 `observe` and `act` return structured feedback plus a viewable screenshot
 image; `act` accepts `goto`, `click`, `type`, `scroll`, `hover`, `highlight`,
-and `wait` actions. Re-observe after navigation or DOM changes to refresh
-element refs. The scripted `examples/demo_client.py` runs a complete smoke
-test against `https://example.com`.
+and `wait` actions. Re-observe after navigation to refresh element refs;
+same-page DOM re-renders are handled by re-queryable locators. The scripted
+`examples/demo_client.py` runs a complete smoke test against
+`https://example.com`.
 
 ## Deploy on EasyPanel/Hetzner
 
