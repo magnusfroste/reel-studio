@@ -18,7 +18,14 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from .render import mux_narration, probe_duration, start_recording, stop_recording
+from .render import (
+    mux_narration,
+    probe_duration,
+    segmented_render,
+    segmented_render_enabled,
+    start_recording,
+    stop_recording,
+)
 from .schema import Action
 from .tts import synthesize
 
@@ -56,6 +63,7 @@ class BrowserSession:
     t0: float
     refs: dict[str, str] = field(default_factory=dict)
     narrations: list[tuple[float, Path, str]] = field(default_factory=list)
+    timeline: list[tuple[float, Path | None, float]] = field(default_factory=list)
     refs_stale: bool = True
     runtime_closed: bool = False
 
@@ -245,6 +253,8 @@ class BrowserSession:
             return await self.error_result("action_failed", str(exc))
         if clip:
             self.narrations.append((offset, clip, narration))
+        self.timeline.append((offset, clip, duration))
+        if clip:
             elapsed = time.monotonic() - (self.t0 + offset)
             padding_applied = elapsed < duration
             if elapsed < duration:
@@ -283,7 +293,14 @@ class BrowserSession:
         if not video.is_file() or video.stat().st_size == 0:
             raise FileNotFoundError(f"Recording is missing or empty: {video}")
         final = self.directory / "video.mp4"
-        mux_narration(video, [(offset, clip) for offset, clip, _ in self.narrations], final)
+        if segmented_render_enabled():
+            segmented_render(video, self.timeline, final)
+        else:
+            mux_narration(
+                video,
+                [(offset, clip) for offset, clip, _ in self.narrations],
+                final,
+            )
         if not final.is_file() or final.stat().st_size == 0:
             raise RuntimeError("FFmpeg did not produce a playable video")
         return final
