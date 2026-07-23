@@ -132,6 +132,15 @@ PAGE_STYLES = """
     .backlog-item { position: relative; }
     .badges { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0; }
     .badge { background: #263453; border-radius: 999px; color: #dbe2ff; font-size: .8rem; padding: 4px 9px; }
+    .status-badge { border: 1px solid transparent; }
+    .status-open { background: #263453; }
+    .status-planned { background: #3d315f; border-color: #8d70d8; }
+    .status-in_progress { background: #5b431d; border-color: #d59a37; }
+    .status-shipped { background: #1f4d3b; border-color: #4db986; }
+    .status-wont_fix { background: #303744; border-color: #68758b; }
+    .backlog-item-muted { opacity: .62; }
+    .backlog-item-muted h3 { text-decoration: line-through; }
+    .status-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 28px; }
 """
 
 
@@ -310,19 +319,40 @@ def backlog_item(item: dict) -> str:
     detail = html.escape(item["detail"])
     category = html.escape(item["category"])
     severity = html.escape(item["severity"])
-    status = html.escape(item["status"])
+    status_key = (
+        item["status"]
+        if item["status"] in store.BACKLOG_STATUSES
+        else "open"
+    )
+    status = html.escape(status_key)
     created_at = html.escape(item["created_at"])
+    note = html.escape(item.get("note") or "")
+    updated_at = html.escape(item.get("updated_at") or created_at)
+    muted = " backlog-item-muted" if status_key in {"shipped", "wont_fix"} else ""
     return f"""
-    <article class="backlog-item card" data-backlog-id="{html.escape(item["id"], quote=True)}">
+    <article class="backlog-item card{muted}" data-backlog-id="{html.escape(item["id"], quote=True)}">
       <h3>{title}</h3>
       <div class="badges">
         <span class="badge">{category}</span>
         <span class="badge">{severity} severity</span>
-        <span class="badge">{status}</span>
+        <span class="badge status-badge status-{status}">{status}</span>
       </div>
       <p>{detail or '<span class="muted">No additional detail.</span>'}</p>
-      <p class="muted">{created_at}</p>
+      {f'<p class="muted">Note: {note}</p>' if note else ''}
+      <p class="muted">Updated {updated_at}</p>
     </article>"""
+
+
+def backlog_status_summary(items: list[dict]) -> str:
+    counts = {status: 0 for status in store.BACKLOG_STATUSES}
+    for item in items:
+        if item["status"] in counts:
+            counts[item["status"]] += 1
+    return "".join(
+        f'<span class="badge status-badge status-{status}">'
+        f'{status.replace("_", " ")}: {counts[status]}</span>'
+        for status in store.BACKLOG_STATUSES
+    )
 
 
 def backlog_page() -> str:
@@ -335,8 +365,9 @@ def backlog_page() -> str:
     <section class="hero" style="padding-bottom: 28px;">
       <div class="eyebrow">Open-source roadmap</div>
       <h1>Agent backlog.</h1>
-      <p class="lede">A public list of the improvements agents ask for while
+    <p class="lede">A public list of the improvements agents ask for while
       directing real product stories.</p>
+    <div class="status-summary">{backlog_status_summary(items)}</div>
     </section>
     <div class="theater-grid">
       {cards}
@@ -355,8 +386,9 @@ def bug_report_page() -> str:
     <section class="hero" style="padding-bottom: 28px;">
       <div class="eyebrow">Open-source bug reports</div>
       <h1>Bug reports.</h1>
-      <p class="lede">Known product and directing-agent problems submitted from
+    <p class="lede">Known product and directing-agent problems submitted from
       real recording sessions.</p>
+    <div class="status-summary">{backlog_status_summary(items)}</div>
     </section>
     <div class="theater-grid">
       {cards}
@@ -465,6 +497,12 @@ def docs_page() -> str:
       <p>List recent agent backlog requests, optionally filtered by status.
       The public roadmap is available at <a href="/backlog">/backlog</a> and
       its JSON feed at <code>/api/backlog</code>.</p></div>
+    <div class="tool card"><h3><code>update_backlog(id, status, note?)</code></h3>
+      <p>Move a backlog item through <code>open</code>, <code>planned</code>,
+      <code>in_progress</code>, <code>shipped</code>, or
+      <code>wont_fix</code>, optionally recording resolution context. Unknown
+      statuses normalize to <code>open</code>; unknown IDs return a structured
+      error.</p></div>
     <p>Bug-category requests are also collected at the public
     <a href="/bug_report">/bug_report</a> page and
     <code>/api/bug_reports</code> feed.</p>
@@ -843,6 +881,25 @@ async def submit_backlog(
 async def list_backlog(limit: int = 50, status: str | None = None) -> list[dict]:
     """List agent backlog requests from durable metadata."""
     return store.list_backlog(limit, status.strip().lower() if status else None)
+
+
+@mcp.tool()
+async def update_backlog(
+    id: str,
+    status: str,
+    note: str | None = None,
+) -> dict:
+    """Update a backlog item's roadmap status and resolution note."""
+    item = store.update_backlog(id.strip(), status, note)
+    if item is None:
+        return {
+            "ok": False,
+            "error": {
+                "type": "backlog_not_found",
+                "message": f"Unknown backlog id: {id}",
+            },
+        }
+    return item
 
 
 @mcp.tool()

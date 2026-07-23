@@ -71,6 +71,11 @@ default provider, or select it per session. ElevenLabs requires the
 the ElevenLabs voice ID. No API key is needed for the default Edge provider.
 `list_sessions` and `get_session` read durable SQLite metadata, including
 finished sessions and their storyboard steps after a restart.
+The token-gated `submit_backlog`, `list_backlog`, and `update_backlog` tools
+manage the public roadmap. Backlog statuses are `open`, `planned`,
+`in_progress`, `shipped`, and `wont_fix`; updates can include a resolution
+note. Public backlog and bug-report feeds expose the status, note, and update
+timestamp.
 For a finished session, `update_step_narration` edits one storyboard
 narration and `rerender` rebuilds only the audio track onto the existing
 recorded video without re-recording the browser. Overlapping narration is

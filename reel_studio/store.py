@@ -12,6 +12,7 @@ from .engine import output_root
 
 
 _lock = threading.Lock()
+BACKLOG_STATUSES = ("open", "planned", "in_progress", "shipped", "wont_fix")
 
 
 def db_path() -> Path:
@@ -80,6 +81,8 @@ def init_schema() -> None:
                 severity TEXT NOT NULL,
                 session_id TEXT,
                 status TEXT NOT NULL DEFAULT 'open',
+                note TEXT,
+                updated_at TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS backlog_created_idx
@@ -103,6 +106,22 @@ def init_schema() -> None:
         for column in ("output_width", "output_height"):
             if column not in session_columns:
                 connection.execute(f"ALTER TABLE sessions ADD COLUMN {column} INTEGER")
+        backlog_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(backlog)").fetchall()
+        }
+        if "note" not in backlog_columns:
+            connection.execute("ALTER TABLE backlog ADD COLUMN note TEXT")
+        if "updated_at" not in backlog_columns:
+            connection.execute("ALTER TABLE backlog ADD COLUMN updated_at TEXT")
+        connection.execute(
+            "UPDATE backlog SET updated_at = created_at WHERE updated_at IS NULL"
+        )
+
+
+def normalize_backlog_status(value: str | None) -> str:
+    normalized = (value or "").strip().lower()
+    return normalized if normalized in BACKLOG_STATUSES else "open"
 
 
 def create_session(
@@ -296,14 +315,17 @@ def create_backlog(
         "severity": severity,
         "session_id": session_id,
         "status": "open",
+        "note": None,
+        "updated_at": _now(),
         "created_at": _now(),
     }
     with _lock, _connect() as connection:
         connection.execute(
             """
             INSERT INTO backlog
-                (id, title, detail, category, severity, session_id, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, title, detail, category, severity, session_id, status,
+                 note, updated_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             tuple(item.values()),
         )
@@ -322,7 +344,7 @@ def list_backlog(
         parameters: list[Any] = []
         if status:
             clauses.append("status = ?")
-            parameters.append(status)
+            parameters.append(normalize_backlog_status(status))
         if category:
             clauses.append("category = ?")
             parameters.append(category)
@@ -330,7 +352,8 @@ def list_backlog(
         parameters.append(limit)
         rows = connection.execute(
             f"""
-            SELECT id, title, detail, category, severity, session_id, status, created_at
+            SELECT id, title, detail, category, severity, session_id, status,
+                   note, updated_at, created_at
             FROM backlog
             {where}
             ORDER BY created_at DESC
@@ -339,6 +362,37 @@ def list_backlog(
             parameters,
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def update_backlog(
+    item_id: str,
+    status: str,
+    note: str | None = None,
+) -> dict[str, Any] | None:
+    init_schema()
+    updated_at = _now()
+    normalized_status = normalize_backlog_status(status)
+    normalized_note = note.strip() if note is not None else None
+    with _lock, _connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE backlog
+            SET status = ?, note = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (normalized_status, normalized_note, updated_at, item_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+        row = connection.execute(
+            """
+            SELECT id, title, detail, category, severity, session_id, status,
+                   note, updated_at, created_at
+            FROM backlog WHERE id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+    return dict(row)
 
 
 def get_session(session_id: str) -> dict[str, Any] | None:
