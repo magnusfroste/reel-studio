@@ -108,6 +108,24 @@ class BrowserSession:
         recorder = start_recording(display, width, height, directory / "screen.mp4")
         # Give ffmpeg one frame before t0 is recorded.
         await asyncio.sleep(0.4)
+        if recorder.poll() is not None:
+            exit_code = recorder.returncode
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
+            try:
+                xvfb.terminate()
+                xvfb.wait(timeout=5)
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Screen recorder exited during startup (exit code {exit_code})"
+            )
         return cls(
             session_id, start_url, width, height, voice, provider, output_size,
             directory, display_number, xvfb, playwright, browser, context, page,
@@ -397,8 +415,17 @@ class BrowserSession:
     def _finish_media(self) -> Path:
         stop_recording(self.recorder)
         video = self.directory / "screen.mp4"
-        if not video.is_file() or video.stat().st_size == 0:
-            raise FileNotFoundError(f"Recording is missing or empty: {video}")
+        size = video.stat().st_size if video.is_file() else 0
+        if size == 0:
+            raise FileNotFoundError(
+                f"Recording is missing or empty: {video} (size={size} bytes)"
+            )
+        try:
+            probe_duration(video)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Recording is unreadable: {video} (size={size} bytes): {exc}"
+            ) from exc
         final = self.directory / "video.mp4"
         if segmented_render_enabled():
             segmented_render(video, self.timeline, final, self.output_size)

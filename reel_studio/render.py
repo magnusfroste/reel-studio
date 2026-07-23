@@ -16,7 +16,8 @@ def start_recording(display: str, width: int, height: int, output: Path) -> subp
             "ffmpeg", "-loglevel", "error", "-nostats", "-y", "-f", "x11grab",
             "-video_size", f"{width}x{height}",
             "-framerate", "25", "-i", f"{display}.0", "-draw_mouse", "1",
-            "-pix_fmt", "yuv420p", str(output),
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-threads", "0", "-pix_fmt", "yuv420p", str(output),
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
@@ -29,7 +30,7 @@ def stop_recording(process: subprocess.Popen[bytes]) -> None:
         return
     try:
         process.send_signal(signal.SIGINT)
-        process.wait(timeout=8)
+        process.wait(timeout=12)
     except subprocess.TimeoutExpired:
         process.terminate()
         try:
