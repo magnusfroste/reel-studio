@@ -44,6 +44,7 @@ class BrowserSession:
     width: int
     height: int
     voice: str
+    provider: str
     directory: Path
     display_number: int
     xvfb: subprocess.Popen[bytes]
@@ -59,7 +60,14 @@ class BrowserSession:
     runtime_closed: bool = False
 
     @classmethod
-    async def create(cls, start_url: str, width: int, height: int, voice: str) -> "BrowserSession":
+    async def create(
+        cls,
+        start_url: str,
+        width: int,
+        height: int,
+        voice: str,
+        provider: str = "edge",
+    ) -> "BrowserSession":
         session_id = uuid.uuid4().hex
         directory = output_root() / session_id
         directory.mkdir(parents=True, exist_ok=True)
@@ -90,8 +98,11 @@ class BrowserSession:
         recorder = start_recording(display, width, height, directory / "screen.mp4")
         # Give ffmpeg one frame before t0 is recorded.
         await asyncio.sleep(0.4)
-        return cls(session_id, start_url, width, height, voice, directory, display_number,
-                   xvfb, playwright, browser, context, page, recorder, time.monotonic())
+        return cls(
+            session_id, start_url, width, height, voice, provider, directory,
+            display_number, xvfb, playwright, browser, context, page, recorder,
+            time.monotonic(),
+        )
 
     async def capture_screenshot(self) -> Path:
         screenshot = self.directory / f"screenshot-{int(time.time() * 1000)}.jpg"
@@ -172,7 +183,9 @@ class BrowserSession:
             )
         if narration:
             try:
-                clip = await synthesize(narration, self.voice, self.directory)
+                clip = await synthesize(
+                    narration, self.voice, self.directory, self.provider
+                )
                 duration = probe_duration(clip)
             except Exception as exc:
                 return await self.error_result("narration_failed", str(exc))

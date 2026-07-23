@@ -41,6 +41,7 @@ def init_schema() -> None:
                 start_url TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('active', 'finished', 'error')),
                 voice TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'edge',
                 width INTEGER NOT NULL,
                 height INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
@@ -89,6 +90,14 @@ def init_schema() -> None:
         }
         if "voice" not in columns:
             connection.execute("ALTER TABLE steps ADD COLUMN voice TEXT")
+        session_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "provider" not in session_columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'edge'"
+            )
 
 
 def create_session(
@@ -98,16 +107,17 @@ def create_session(
     width: int,
     height: int,
     output_dir: str,
+    provider: str = "edge",
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
         connection.execute(
             """
             INSERT INTO sessions
-                (id, start_url, status, voice, width, height, created_at, output_dir)
-            VALUES (?, ?, 'active', ?, ?, ?, ?, ?)
+                (id, start_url, status, voice, provider, width, height, created_at, output_dir)
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, start_url, voice, width, height, _now(), output_dir),
+            (session_id, start_url, voice, provider, width, height, _now(), output_dir),
         )
 
 
