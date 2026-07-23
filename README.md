@@ -80,7 +80,10 @@ last video frame.
 `observe` also includes truncated visible `page_text` so agents can verify
 plain page content such as table rows without reading the image.
 `act` accepts `goto`, `click`, `type`, `scroll`, `hover`, `highlight`,
-and `wait` actions. Re-observe after navigation to refresh element refs;
+`scroll_to_text`, and `wait` actions. `scroll_to_text` finds visible text,
+scrolls it into view, and returns its bounding box. Use `assert_visible` to
+check text without adding a storyboard step or changing the recording.
+Re-observe after navigation to refresh element refs;
 same-page DOM re-renders are handled by re-queryable locators. The scripted
 `examples/demo_client.py` runs a complete smoke test against
 `https://example.com`.

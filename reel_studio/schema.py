@@ -4,7 +4,10 @@ from pydantic import BaseModel, Field
 
 
 class Action(BaseModel):
-    type: Literal["goto", "click", "type", "scroll", "hover", "highlight", "wait"]
+    type: Literal[
+        "goto", "click", "type", "scroll", "scroll_to_text",
+        "hover", "highlight", "wait",
+    ]
     url: str | None = None
     ref: str | None = None
     text: str | None = None
