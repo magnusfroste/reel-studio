@@ -1,5 +1,6 @@
 """FastMCP entry point for Reel Studio."""
 
+import asyncio
 import hmac
 import html
 import json
@@ -749,8 +750,37 @@ async def list_backlog(limit: int = 50, status: str | None = None) -> list[dict]
 @mcp.tool()
 async def finish(session_id: str) -> dict:
     """Stop recording and render the final MP4."""
-    session = sessions.pop(session_id)
-    video_path = await session.finish()
+    session = sessions.get(session_id)
+    if session is None:
+        stored = store.get_session(session_id)
+        if stored is not None and stored.get("status") == "finished":
+            return {
+                "ok": False,
+                "error": {
+                    "type": "already_finished",
+                    "message": f"Session already finished: {session_id}",
+                },
+            }
+        return {
+            "ok": False,
+            "error": {
+                "type": "unknown_session",
+                "message": f"Unknown session_id: {session_id}",
+            },
+        }
+    try:
+        video_path = await session.finish()
+        duration = await asyncio.to_thread(probe_duration, video_path)
+    except FileNotFoundError as exc:
+        return {
+            "ok": False,
+            "error": {"type": "recording_missing", "message": str(exc)},
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {"type": "finish_failed", "message": str(exc)},
+        }
     public_base_url = os.environ.get("REEL_PUBLIC_BASE_URL", "").rstrip("/")
     video_url = (
         f"{public_base_url}/videos/{session_id}/video.mp4"
@@ -761,8 +791,9 @@ async def finish(session_id: str) -> dict:
         session_id,
         str(video_path),
         video_url,
-        probe_duration(video_path),
+        duration,
     )
+    sessions.pop(session_id, None)
     return {"video_path": str(video_path), "video_url": video_url}
 
 
