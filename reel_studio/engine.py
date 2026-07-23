@@ -203,6 +203,45 @@ class BrowserSession:
             "[data-video-director-spotlight]"
         ).evaluate_all("(nodes) => nodes.forEach((node) => node.remove())")
 
+    async def _visible_text_target(self, text: str) -> Locator | None:
+        text = text.strip()
+        if not text:
+            return None
+        matches = self.page.get_by_text(text, exact=False)
+        for index in range(await matches.count()):
+            candidate = matches.nth(index)
+            try:
+                if await candidate.is_visible():
+                    return candidate
+            except PlaywrightError:
+                continue
+        return None
+
+    async def _box_in_viewport(self, box: dict | None) -> bool:
+        if not box:
+            return False
+        viewport = self.page.viewport_size or {
+            "width": self.width,
+            "height": self.height,
+        }
+        return (
+            box["x"] < viewport["width"]
+            and box["y"] < viewport["height"]
+            and box["x"] + box["width"] > 0
+            and box["y"] + box["height"] > 0
+        )
+
+    async def assert_visible(self, text: str) -> dict:
+        target = await self._visible_text_target(text)
+        if target is None:
+            return {"visible": False, "box": None, "in_viewport": False}
+        box = await target.bounding_box()
+        return {
+            "visible": True,
+            "box": box,
+            "in_viewport": await self._box_in_viewport(box),
+        }
+
     async def error_result(self, error_type: str, message: str) -> tuple[dict, Path | None]:
         screenshot: Path | None = None
         try:
@@ -222,6 +261,8 @@ class BrowserSession:
         offset = time.monotonic() - self.t0
         clip: Path | None = None
         duration = 0.0
+        action_box: dict | None = None
+        action_in_viewport: bool | None = None
         before_url = self.page.url
         if action.ref and self.refs_stale:
             return await self.error_result(
@@ -242,6 +283,20 @@ class BrowserSession:
                 if not action.url:
                     return await self.error_result("invalid_action", "goto requires url")
                 await self.page.goto(action.url, wait_until="domcontentloaded", timeout=15000)
+            elif action_type == "scroll_to_text":
+                if not action.text or not action.text.strip():
+                    return await self.error_result(
+                        "invalid_action", "scroll_to_text requires text"
+                    )
+                target = await self._visible_text_target(action.text)
+                if target is None:
+                    return await self.error_result(
+                        "text_not_found",
+                        f"Visible text not found: {action.text}",
+                    )
+                await target.scroll_into_view_if_needed(timeout=5000)
+                action_box = await target.bounding_box()
+                action_in_viewport = await self._box_in_viewport(action_box)
             elif action_type in {"click", "type", "hover", "highlight"}:
                 if not action.ref or action.ref not in self.refs:
                     return await self.error_result(
@@ -311,7 +366,7 @@ class BrowserSession:
         else:
             padding_applied = False
         screenshot = await self.capture_screenshot()
-        return {
+        result = {
             "ok": True,
             "offset_seconds": round(offset, 3),
             "url": self.page.url,
@@ -321,7 +376,10 @@ class BrowserSession:
             "padding_applied": padding_applied,
             "refs_stale": self.refs_stale,
             "screenshot_path": str(screenshot),
-        }, screenshot
+        }
+        if action_type == "scroll_to_text":
+            result.update({"box": action_box, "in_viewport": action_in_viewport})
+        return result, screenshot
 
     def status(self) -> dict:
         elapsed = time.monotonic() - self.t0

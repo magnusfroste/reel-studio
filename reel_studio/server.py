@@ -423,8 +423,14 @@ def docs_page() -> str:
       <p><strong>Actions:</strong>
       <code>goto{{url}}</code>, <code>click{{ref}}</code>,
       <code>type{{ref,text}}</code>, <code>scroll{{dy}}</code>,
+      <code>scroll_to_text{{text}}</code>,
       <code>hover{{ref}}</code>, <code>highlight{{ref}}</code>, and
       <code>wait{{ms}}</code>. Refs come from <code>observe</code>.</p></div>
+    <div class="tool card"><h3><code>assert_visible(session_id, text)</code></h3>
+      <p>Check whether visible text is present without recording a storyboard
+      step or changing the rendered video.</p>
+      <p><strong>Returns:</strong> <code>{{"visible", "box", "in_viewport"}}</code>.
+      A missing text match returns <code>visible: false</code>, not an error.</p></div>
     <div class="tool card"><h3><code>get_status(session_id)</code></h3>
       <p>Returns elapsed seconds, recorded step count, total narrated seconds,
       and estimated final video length.</p></div>
@@ -639,6 +645,21 @@ async def act(session_id: str, action: dict, narration: str = "") -> CallToolRes
         session.voice,
     )
     return feedback_result(payload, screenshot)
+
+
+@mcp.tool()
+async def assert_visible(session_id: str, text: str) -> dict:
+    """Check for visible text without recording a storyboard step."""
+    session = sessions.get(session_id)
+    if session is None:
+        return {
+            "ok": False,
+            "error": {
+                "type": "unknown_session",
+                "message": f"Unknown session_id: {session_id}",
+            },
+        }
+    return await session.assert_visible(text)
 
 
 @mcp.tool()
