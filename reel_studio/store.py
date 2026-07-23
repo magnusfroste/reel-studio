@@ -44,6 +44,8 @@ def init_schema() -> None:
                 provider TEXT NOT NULL DEFAULT 'edge',
                 width INTEGER NOT NULL,
                 height INTEGER NOT NULL,
+                output_width INTEGER,
+                output_height INTEGER,
                 created_at TEXT NOT NULL,
                 finished_at TEXT,
                 output_dir TEXT NOT NULL,
@@ -98,6 +100,9 @@ def init_schema() -> None:
             connection.execute(
                 "ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'edge'"
             )
+        for column in ("output_width", "output_height"):
+            if column not in session_columns:
+                connection.execute(f"ALTER TABLE sessions ADD COLUMN {column} INTEGER")
 
 
 def create_session(
@@ -108,16 +113,22 @@ def create_session(
     height: int,
     output_dir: str,
     provider: str = "edge",
+    output_width: int | None = None,
+    output_height: int | None = None,
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
         connection.execute(
             """
             INSERT INTO sessions
-                (id, start_url, status, voice, provider, width, height, created_at, output_dir)
-            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?)
+                (id, start_url, status, voice, provider, width, height,
+                 output_width, output_height, created_at, output_dir)
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, start_url, voice, provider, width, height, _now(), output_dir),
+            (
+                session_id, start_url, voice, provider, width, height,
+                output_width, output_height, _now(), output_dir,
+            ),
         )
 
 

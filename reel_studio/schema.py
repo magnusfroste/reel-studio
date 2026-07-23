@@ -10,3 +10,4 @@ class Action(BaseModel):
     text: str | None = None
     dy: int = 0
     ms: int = Field(default=0, ge=0)
+    spotlight: bool = True

@@ -365,6 +365,26 @@ def bug_report_page() -> str:
     return page_shell("Public bug reports", content)
 
 
+def _resolve_output_size(
+    requested: str | None,
+    capture_width: int,
+    capture_height: int,
+) -> tuple[int, int] | None:
+    value = requested or os.environ.get("REEL_OUTPUT_SIZE")
+    if not value:
+        return None
+    try:
+        width_text, height_text = value.lower().replace(" ", "").split("x", 1)
+        width, height = int(width_text), int(height_text)
+    except (TypeError, ValueError):
+        raise ValueError("output_size must use WIDTHxHEIGHT, for example 1280x720")
+    if width <= 0 or height <= 0:
+        raise ValueError("output_size dimensions must be positive")
+    if width > capture_width or height > capture_height:
+        raise ValueError("output_size cannot exceed the capture dimensions")
+    return width, height
+
+
 def docs_page() -> str:
     """Render the detailed MCP and API reference."""
     endpoint = html.escape(mcp_endpoint())
@@ -377,17 +397,20 @@ def docs_page() -> str:
     </section>
     <p class="endpoint">MCP endpoint: <code>{endpoint}</code></p>
     <h2>Tools</h2>
-    <div class="tool card"><h3><code>start_session(start_url, width, height, voice, provider?)</code></h3>
+    <div class="tool card"><h3><code>start_session(start_url, width, height, voice, provider?, output_size?)</code></h3>
       <p>Launch headed Chromium and begin recording.</p>
       <p><strong>Returns:</strong> <code>{{"session_id"}}</code>. Width defaults to
-      1280, height to 720, and voice to <code>en-US-JennyNeural</code>. TTS
+      1920, height to 1080, and voice to <code>en-US-JennyNeural</code>. The
+      optional <code>output_size</code> (for example <code>1280x720</code>)
+      downscales only the final MP4; capture stays at the requested viewport
+      size. <code>REEL_OUTPUT_SIZE</code> provides the same default. TTS
       defaults to the free <code>edge</code> provider. Set provider to
       <code>elevenlabs</code> for premium voices; this requires
       <code>ELEVENLABS_API_KEY</code>.</p></div>
     <div class="tool card"><h3><code>observe(session_id)</code></h3>
       <p>Capture the current screen and discover interactive elements.</p>
       <p><strong>Returns:</strong> <code>{{"screenshot_path", "url", "title",
-      "elements":[], "refs_stale": false}}</code> plus a viewable image.
+      "page_text", "elements":[], "refs_stale": false}}</code> plus a viewable image.
       Each element includes a stable <code>ref</code>, role, text, and bounding box.</p></div>
     <div class="tool card"><h3><code>act(session_id, action, narration?)</code></h3>
       <p>Perform one browser action. Add optional narration to hold the moment
@@ -532,9 +555,10 @@ async def bug_reports_api(request: Request) -> Response:
 
 @mcp.tool()
 async def start_session(
-    start_url: str, width: int = 1280, height: int = 720,
+    start_url: str, width: int = 1920, height: int = 1080,
     voice: str = "en-US-JennyNeural",
     provider: str | None = None,
+    output_size: str | None = None,
 ) -> dict:
     """Launch a headed browser and begin recording."""
     try:
@@ -545,8 +569,15 @@ async def start_session(
             "ok": False,
             "error": {"type": "tts_provider_unconfigured", "message": str(exc)},
         }
+    try:
+        selected_output_size = _resolve_output_size(output_size, width, height)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": {"type": "invalid_output_size", "message": str(exc)},
+        }
     session = await BrowserSession.create(
-        start_url, width, height, voice, selected_provider
+        start_url, width, height, voice, selected_provider, selected_output_size
     )
     sessions[session.session_id] = session
     store.create_session(
@@ -557,6 +588,7 @@ async def start_session(
         height,
         str(session.directory),
         selected_provider,
+        *(selected_output_size or (None, None)),
     )
     return {"session_id": session.session_id}
 
@@ -726,13 +758,29 @@ async def rerender(session_id: str) -> dict:
             duration = float(step.get("narration_duration") or 0.0)
         render_steps.append((offset, clip, duration))
     if segmented_render_enabled():
+        output_width = session.get("output_width")
+        output_height = session.get("output_height")
+        output_size = (
+            (int(output_width), int(output_height))
+            if output_width and output_height
+            else None
+        )
         result = await asyncio.to_thread(
-            segmented_render, source_video, render_steps, video_path
+            segmented_render, source_video, render_steps, video_path, output_size
         )
         warnings = result.warnings
         duration = result.duration
     else:
-        await asyncio.to_thread(rerender_narration, source_video, clips, video_path)
+        output_width = session.get("output_width")
+        output_height = session.get("output_height")
+        output_size = (
+            (int(output_width), int(output_height))
+            if output_width and output_height
+            else None
+        )
+        await asyncio.to_thread(
+            rerender_narration, source_video, clips, video_path, output_size
+        )
         duration = await asyncio.to_thread(probe_duration, video_path)
     store.update_session_duration(session_id, duration)
     return {

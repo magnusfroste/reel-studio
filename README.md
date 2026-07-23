@@ -59,6 +59,11 @@ stdio:
 ```
 
 Tools are `start_session`, `observe`, `act`, `finish`, and `get_status`.
+`start_session` captures at 1920x1080 by default; `width` and `height` remain
+overridable. Set optional `output_size` (for example `1280x720`) to downscale
+only the final MP4 while retaining the larger capture viewport, or set
+`REEL_OUTPUT_SIZE` as the default. Without either setting, output matches the
+capture resolution.
 `start_session` accepts an optional `provider` (`edge` or `elevenlabs`) and
 defaults to `edge`. Set `REEL_TTS_PROVIDER=elevenlabs` to make ElevenLabs the
 default provider, or select it per session. ElevenLabs requires the
@@ -71,8 +76,10 @@ narration and `rerender` rebuilds only the audio track onto the existing
 recorded video without re-recording the browser. Overlapping narration is
 reported as warnings; audio that exceeds the original timeline extends the
 last video frame.
-`observe` and `act` return structured feedback plus a viewable screenshot
-image; `act` accepts `goto`, `click`, `type`, `scroll`, `hover`, `highlight`,
+`observe` and `act` return structured feedback plus a viewable screenshot.
+`observe` also includes truncated visible `page_text` so agents can verify
+plain page content such as table rows without reading the image.
+`act` accepts `goto`, `click`, `type`, `scroll`, `hover`, `highlight`,
 and `wait` actions. Re-observe after navigation to refresh element refs;
 same-page DOM re-renders are handled by re-queryable locators. The scripted
 `examples/demo_client.py` runs a complete smoke test against
