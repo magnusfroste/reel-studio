@@ -1,8 +1,11 @@
 """ffmpeg and X11 recording helpers."""
 
+from dataclasses import dataclass
+import os
 from pathlib import Path
 import signal
 import subprocess
+import tempfile
 from typing import Sequence
 
 
@@ -72,6 +75,171 @@ def mux_narration(
     ])
     subprocess.run(command, check=True)
     return output_path
+
+
+SEGMENT_FLOOR = 1.0
+SEGMENT_TAIL_PAD = 0.4
+LEAD_IN_CAP = 1.0
+
+
+@dataclass(frozen=True)
+class SegmentedRenderResult:
+    path: Path
+    duration: float
+    warnings: list[dict]
+
+
+def segmented_render_enabled() -> bool:
+    return os.environ.get("REEL_SEGMENTED", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def segmented_render(
+    video_path: Path,
+    steps: Sequence[tuple[float, Path | None, float]],
+    output_path: Path,
+) -> SegmentedRenderResult:
+    """Render kept step windows from the original continuous recording."""
+    video_duration = probe_duration(video_path)
+    ordered = sorted(
+        (offset, clip, max(0.0, duration))
+        for offset, clip, duration in steps
+        if 0 <= offset < video_duration
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".segments-", dir=output_path.parent
+    ) as temporary:
+        temporary_path = Path(temporary)
+        segment_paths: list[Path] = []
+        audio_clips: list[tuple[float, Path]] = []
+        warnings: list[dict] = []
+        cumulative = 0.0
+
+        if ordered and ordered[0][0] > 0:
+            lead = min(LEAD_IN_CAP, ordered[0][0])
+            segment_paths.append(
+                _render_video_segment(
+                    video_path, 0.0, lead, lead,
+                    temporary_path / "segment-lead.mp4",
+                )
+            )
+            cumulative += lead
+
+        for index, (offset, clip, narration_duration) in enumerate(ordered):
+            next_offset = (
+                ordered[index + 1][0]
+                if index + 1 < len(ordered)
+                else video_duration
+            )
+            available = max(0.0, next_offset - offset)
+            if available <= 0:
+                continue
+            target = max(narration_duration, SEGMENT_FLOOR) + SEGMENT_TAIL_PAD
+            keep_duration = min(available, target)
+            if narration_duration > available:
+                warnings.append({
+                    "index": index,
+                    "needed_seconds": round(narration_duration, 3),
+                    "available_seconds": round(available, 3),
+                })
+                keep_duration = narration_duration + SEGMENT_TAIL_PAD
+            segment_path = temporary_path / f"segment-{index:04d}.mp4"
+            segment_paths.append(
+                _render_video_segment(
+                    video_path,
+                    offset,
+                    min(available, keep_duration),
+                    keep_duration,
+                    segment_path,
+                )
+            )
+            if clip is not None:
+                audio_clips.append((cumulative, clip))
+            cumulative += keep_duration
+
+        if not segment_paths:
+            segment_paths.append(
+                _render_video_segment(
+                    video_path, 0.0, video_duration, video_duration,
+                    temporary_path / "segment-full.mp4",
+                )
+            )
+            cumulative = video_duration
+
+        joined = temporary_path / "joined.mp4"
+        concat_list = temporary_path / "segments.txt"
+        concat_list.write_text(
+            "".join(f"file '{path}'\n" for path in segment_paths)
+        )
+        subprocess.run(
+            [
+                "ffmpeg", "-loglevel", "error", "-y", "-f", "concat",
+                "-safe", "0", "-i", str(concat_list), "-c", "copy",
+                str(joined),
+            ],
+            check=True,
+        )
+        _mux_segment_audio(joined, audio_clips, output_path, cumulative)
+    return SegmentedRenderResult(output_path, probe_duration(output_path), warnings)
+
+
+def _render_video_segment(
+    video_path: Path,
+    offset: float,
+    source_duration: float,
+    output_duration: float,
+    output_path: Path,
+) -> Path:
+    command = [
+        "ffmpeg", "-loglevel", "error", "-y",
+        "-ss", f"{offset:.3f}", "-i", str(video_path),
+        "-t", f"{source_duration:.3f}",
+    ]
+    extension = output_duration - source_duration
+    if extension > 0.01:
+        command.extend([
+            "-vf", f"tpad=stop_mode=clone:stop_duration={extension:.3f}",
+        ])
+    command.extend([
+        "-an", "-c:v", "libx264", "-preset", "veryfast",
+        "-pix_fmt", "yuv420p", str(output_path),
+    ])
+    subprocess.run(command, check=True)
+    return output_path
+
+
+def _mux_segment_audio(
+    video_path: Path,
+    clips: Sequence[tuple[float, Path]],
+    output_path: Path,
+    duration: float,
+) -> None:
+    command = ["ffmpeg", "-loglevel", "error", "-y", "-i", str(video_path)]
+    if clips:
+        filters: list[str] = []
+        for index, (offset, clip) in enumerate(clips, start=1):
+            command.extend(["-i", str(clip)])
+            delay = max(0, round(offset * 1000))
+            filters.append(f"[{index}:a]adelay={delay}|{delay}[a{index}]")
+        labels = "".join(f"[a{i}]" for i in range(1, len(clips) + 1))
+        filters.append(
+            f"{labels}amix=inputs={len(clips)}:duration=longest:"
+            "dropout_transition=0[a]"
+        )
+        command.extend([
+            "-filter_complex", ";".join(filters),
+            "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
+            str(output_path),
+        ])
+    else:
+        command.extend([
+            "-f", "lavfi", "-i", "anullsrc=channel_layout=mono:sample_rate=24000",
+            "-map", "0:v", "-map", "1:a", "-t", f"{duration:.3f}",
+            "-c:v", "copy", "-c:a", "aac", str(output_path),
+        ])
+    subprocess.run(command, check=True)
 
 
 def rerender_narration(

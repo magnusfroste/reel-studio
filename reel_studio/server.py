@@ -21,7 +21,12 @@ from starlette.types import ASGIApp
 
 from .engine import BrowserSession, output_root
 from . import store
-from .render import probe_duration, rerender_narration
+from .render import (
+    probe_duration,
+    rerender_narration,
+    segmented_render,
+    segmented_render_enabled,
+)
 from .schema import Action
 from .tts import TTSProviderError, normalize_provider, synthesize, validate_provider
 
@@ -686,42 +691,49 @@ async def rerender(session_id: str) -> dict:
         return error
     video_path = Path(session["video_path"])
     output_dir = video_path.parent
+    source_video = output_dir / "screen.mp4"
+    if not source_video.is_file() or source_video.stat().st_size == 0:
+        return {
+            "ok": False,
+            "error": {
+                "type": "recording_missing",
+                "message": f"Recording is missing or empty: {source_video}",
+            },
+        }
     clips: list[tuple[float, Path]] = []
+    render_steps: list[tuple[float, Path | None, float]] = []
     warnings = []
-    video_duration = probe_duration(video_path)
+    video_duration = await asyncio.to_thread(probe_duration, source_video)
     steps = session["steps"]
     for index, step in enumerate(steps):
-        narration = (step.get("narration_text") or "").strip()
         offset = step.get("offset_seconds")
-        if not narration or offset is None:
+        if offset is None:
             continue
-        voice = step.get("voice") or session["voice"]
-        clip = await synthesize(
-            narration, voice, output_dir, session.get("provider", "edge")
+        narration = (step.get("narration_text") or "").strip()
+        clip: Path | None = None
+        duration = 0.0
+        if narration:
+            voice = step.get("voice") or session["voice"]
+            clip = await synthesize(
+                narration, voice, output_dir, session.get("provider", "edge")
+            )
+            duration = await asyncio.to_thread(probe_duration, clip)
+            store.update_step_narration(
+                session_id, index, narration, voice, narration_duration=duration
+            )
+            clips.append((offset, clip))
+        else:
+            duration = float(step.get("narration_duration") or 0.0)
+        render_steps.append((offset, clip, duration))
+    if segmented_render_enabled():
+        result = await asyncio.to_thread(
+            segmented_render, source_video, render_steps, video_path
         )
-        duration = probe_duration(clip)
-        store.update_step_narration(
-            session_id, index, narration, voice, narration_duration=duration
-        )
-        clips.append((offset, clip))
-        next_offsets = [
-            following.get("offset_seconds")
-            for following in steps[index + 1:]
-            if following.get("offset_seconds") is not None
-        ]
-        available = (
-            min(next_offsets) - offset
-            if next_offsets
-            else video_duration - offset
-        )
-        if duration > available:
-            warnings.append({
-                "index": index,
-                "needed_seconds": round(duration, 3),
-                "available_seconds": round(max(0, available), 3),
-            })
-    rerender_narration(video_path, clips, video_path)
-    duration = probe_duration(video_path)
+        warnings = result.warnings
+        duration = result.duration
+    else:
+        await asyncio.to_thread(rerender_narration, source_video, clips, video_path)
+        duration = await asyncio.to_thread(probe_duration, video_path)
     store.update_session_duration(session_id, duration)
     return {
         "ok": True,
