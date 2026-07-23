@@ -55,10 +55,22 @@ def mux_narration(
     video_path: Path,
     clips: Sequence[tuple[float, Path]],
     output_path: Path,
+    output_size: tuple[int, int] | None = None,
 ) -> Path:
     """Create a delayed mixed narration track and mux it into the video."""
     if not clips:
-        video_path.replace(output_path)
+        if output_size is None:
+            video_path.replace(output_path)
+        else:
+            subprocess.run(
+                [
+                    "ffmpeg", "-loglevel", "error", "-y", "-i", str(video_path),
+                    "-vf", f"scale={output_size[0]}:{output_size[1]}",
+                    "-an", "-c:v", "libx264", "-preset", "veryfast",
+                    "-pix_fmt", "yuv420p", str(output_path),
+                ],
+                check=True,
+            )
         return output_path
 
     command = ["ffmpeg", "-y", "-i", str(video_path)]
@@ -69,9 +81,18 @@ def mux_narration(
         filters.append(f"[{index}:a]adelay={delay}|{delay}[a{index}]")
     labels = "".join(f"[a{i}]" for i in range(1, len(clips) + 1))
     filters.append(f"{labels}amix=inputs={len(clips)}:duration=longest:dropout_transition=0[a]")
+    video_map = "0:v"
+    video_codec = ["-c:v", "copy"]
+    if output_size is not None:
+        filters.insert(
+            0,
+            f"[0:v]scale={output_size[0]}:{output_size[1]}[v]",
+        )
+        video_map = "[v]"
+        video_codec = ["-c:v", "libx264", "-preset", "veryfast"]
     command.extend([
-        "-filter_complex", ";".join(filters), "-map", "0:v", "-map", "[a]",
-        "-c:v", "copy", "-c:a", "aac", str(output_path),
+        "-filter_complex", ";".join(filters), "-map", video_map, "-map", "[a]",
+        *video_codec, "-c:a", "aac", str(output_path),
     ])
     subprocess.run(command, check=True)
     return output_path
@@ -99,6 +120,7 @@ def segmented_render(
     video_path: Path,
     steps: Sequence[tuple[float, Path | None, float]],
     output_path: Path,
+    output_size: tuple[int, int] | None = None,
 ) -> SegmentedRenderResult:
     """Render kept step windows from the original continuous recording."""
     video_duration = probe_duration(video_path)
@@ -123,6 +145,7 @@ def segmented_render(
                 _render_video_segment(
                     video_path, 0.0, lead, lead,
                     temporary_path / "segment-lead.mp4",
+                    output_size,
                 )
             )
             cumulative += lead
@@ -153,6 +176,7 @@ def segmented_render(
                     min(available, keep_duration),
                     keep_duration,
                     segment_path,
+                    output_size,
                 )
             )
             if clip is not None:
@@ -164,6 +188,7 @@ def segmented_render(
                 _render_video_segment(
                     video_path, 0.0, video_duration, video_duration,
                     temporary_path / "segment-full.mp4",
+                    output_size,
                 )
             )
             cumulative = video_duration
@@ -191,6 +216,7 @@ def _render_video_segment(
     source_duration: float,
     output_duration: float,
     output_path: Path,
+    output_size: tuple[int, int] | None = None,
 ) -> Path:
     command = [
         "ffmpeg", "-loglevel", "error", "-y",
@@ -199,9 +225,13 @@ def _render_video_segment(
     ]
     extension = output_duration - source_duration
     if extension > 0.01:
-        command.extend([
-            "-vf", f"tpad=stop_mode=clone:stop_duration={extension:.3f}",
-        ])
+        filters = [f"tpad=stop_mode=clone:stop_duration={extension:.3f}"]
+    else:
+        filters = []
+    if output_size is not None:
+        filters.append(f"scale={output_size[0]}:{output_size[1]}")
+    if filters:
+        command.extend(["-vf", ",".join(filters)])
     command.extend([
         "-an", "-c:v", "libx264", "-preset", "veryfast",
         "-pix_fmt", "yuv420p", str(output_path),
@@ -246,14 +276,23 @@ def rerender_narration(
     video_path: Path,
     clips: Sequence[tuple[float, Path]],
     output_path: Path,
+    output_size: tuple[int, int] | None = None,
 ) -> Path:
     """Replace a video's audio with delayed narration, extending its last frame if needed."""
     video_duration = probe_duration(video_path)
     temp_path = output_path.with_name(f".{output_path.stem}.rerender.mp4")
     if not clips:
+        video_filter = (
+            f"scale={output_size[0]}:{output_size[1]}"
+            if output_size is not None else None
+        )
         command = [
             "ffmpeg", "-y", "-i", str(video_path),
-            "-map", "0:v:0", "-an", "-c:v", "copy", str(temp_path),
+            *(["-vf", video_filter] if video_filter else []),
+            "-map", "0:v:0", "-an",
+            *(["-c:v", "libx264", "-preset", "veryfast"]
+              if output_size is not None else ["-c:v", "copy"]),
+            str(temp_path),
         ]
         subprocess.run(command, check=True)
         temp_path.replace(output_path)
@@ -283,6 +322,19 @@ def rerender_narration(
     else:
         video_map = "0:v:0"
         video_codec = ["-c:v", "copy"]
+    if output_size is not None:
+        if extend_by > 0.05:
+            filters[0] = (
+                f"[0:v]tpad=stop_mode=clone:stop_duration={extend_by:.3f}[padded];"
+                f"[padded]scale={output_size[0]}:{output_size[1]}[scaled]"
+            )
+        else:
+            filters.insert(
+                0,
+                f"[0:v]scale={output_size[0]}:{output_size[1]}[scaled]",
+            )
+        video_map = "[scaled]"
+        video_codec = ["-c:v", "libx264", "-preset", "veryfast"]
     command.extend([
         "-filter_complex", ";".join(filters),
         "-map", video_map, "-map", "[a]",

@@ -52,6 +52,7 @@ class BrowserSession:
     height: int
     voice: str
     provider: str
+    output_size: tuple[int, int] | None
     directory: Path
     display_number: int
     xvfb: subprocess.Popen[bytes]
@@ -75,6 +76,7 @@ class BrowserSession:
         height: int,
         voice: str,
         provider: str = "edge",
+        output_size: tuple[int, int] | None = None,
     ) -> "BrowserSession":
         session_id = uuid.uuid4().hex
         directory = output_root() / session_id
@@ -107,9 +109,9 @@ class BrowserSession:
         # Give ffmpeg one frame before t0 is recorded.
         await asyncio.sleep(0.4)
         return cls(
-            session_id, start_url, width, height, voice, provider, directory,
-            display_number, xvfb, playwright, browser, context, page, recorder,
-            time.monotonic(),
+            session_id, start_url, width, height, voice, provider, output_size,
+            directory, display_number, xvfb, playwright, browser, context, page,
+            recorder, time.monotonic(),
         )
 
     async def capture_screenshot(self) -> Path:
@@ -138,6 +140,7 @@ class BrowserSession:
     async def observe(self) -> tuple[dict, Path]:
         screenshot = await self.capture_screenshot()
         self.refs.clear()
+        page_text = (await self.page.locator("body").inner_text())[:4000]
         elements = []
         locator = self.page.locator("a,button,input,textarea,select,[role=button],[onclick]")
         count = await locator.count()
@@ -160,9 +163,45 @@ class BrowserSession:
             "screenshot_path": str(screenshot),
             "url": self.page.url,
             "title": await self.page.title(),
+            "page_text": page_text,
             "elements": elements,
             "refs_stale": False,
         }, screenshot
+
+    async def _inject_spotlight(self, target: Locator) -> None:
+        await target.evaluate(
+            """(el) => {
+                const rect = el.getBoundingClientRect();
+                const node = document.createElement('div');
+                node.dataset.videoDirectorSpotlight = 'true';
+                Object.assign(node.style, {
+                    position: 'fixed',
+                    left: `${rect.left - 14}px`,
+                    top: `${rect.top - 14}px`,
+                    width: `${rect.width + 28}px`,
+                    height: `${rect.height + 28}px`,
+                    border: '3px solid rgba(255, 193, 7, 0.95)',
+                    borderRadius: '18px',
+                    boxShadow: '0 0 0 6px rgba(255, 193, 7, 0.3), 0 0 30px 12px rgba(255, 193, 7, 0.75)',
+                    pointerEvents: 'none',
+                    zIndex: '2147483647',
+                    transition: 'opacity 420ms ease, transform 420ms ease',
+                    transform: 'scale(0.94)',
+                    opacity: '1',
+                });
+                document.body.appendChild(node);
+                requestAnimationFrame(() => {
+                    node.style.transform = 'scale(1.04)';
+                    node.style.opacity = '0';
+                });
+                setTimeout(() => node.remove(), 500);
+            }"""
+        )
+
+    async def _clear_spotlights(self) -> None:
+        await self.page.locator(
+            "[data-video-director-spotlight]"
+        ).evaluate_all("(nodes) => nodes.forEach((node) => node.remove())")
 
     async def error_result(self, error_type: str, message: str) -> tuple[dict, Path | None]:
         screenshot: Path | None = None
@@ -217,17 +256,23 @@ class BrowserSession:
                 await target.wait_for(state="visible", timeout=5000)
                 await target.scroll_into_view_if_needed(timeout=5000)
                 if action_type == "click":
+                    await self._inject_spotlight(target)
                     await target.click()
+                    await self.page.wait_for_timeout(500)
+                    await self._clear_spotlights()
                 elif action_type == "type":
                     await target.fill(action.text or "")
                 elif action_type == "hover":
                     await target.hover()
                 else:
+                    if action.spotlight:
+                        await self._inject_spotlight(target)
                     await target.evaluate(
                         "(el) => { el.dataset.videoDirectorOldOutline = el.style.outline; "
                         "el.style.outline = '4px solid #ff3b30'; }"
                     )
                     await self.page.wait_for_timeout(1500)
+                    await self._clear_spotlights()
                     await target.evaluate(
                         "(el) => { el.style.outline = el.dataset.videoDirectorOldOutline || ''; "
                         "delete el.dataset.videoDirectorOldOutline; }"
@@ -248,6 +293,10 @@ class BrowserSession:
                 self.refs_stale = True
             return await self.error_result("timeout", str(exc))
         except (PlaywrightError, ValueError) as exc:
+            try:
+                await self._clear_spotlights()
+            except PlaywrightError:
+                pass
             if self.page.url != before_url:
                 self.refs_stale = True
             return await self.error_result("action_failed", str(exc))
@@ -294,12 +343,13 @@ class BrowserSession:
             raise FileNotFoundError(f"Recording is missing or empty: {video}")
         final = self.directory / "video.mp4"
         if segmented_render_enabled():
-            segmented_render(video, self.timeline, final)
+            segmented_render(video, self.timeline, final, self.output_size)
         else:
             mux_narration(
                 video,
                 [(offset, clip) for offset, clip, _ in self.narrations],
                 final,
+                self.output_size,
             )
         if not final.is_file() or final.stat().st_size == 0:
             raise RuntimeError("FFmpeg did not produce a playable video")
