@@ -2,8 +2,8 @@
 
 `reel-studio` is an MCP server that lets an AI agent direct a narrated
 screen recording of a web app. It launches headed Chromium on Xvfb, records
-the display with ffmpeg/x11grab, and renders delayed Edge TTS narration into
-the final MP4.
+the display with ffmpeg/x11grab, and renders delayed narration into the final
+MP4. Edge TTS is the free default; ElevenLabs is an optional premium backend.
 
 ## Setup
 
@@ -59,6 +59,11 @@ stdio:
 ```
 
 Tools are `start_session`, `observe`, `act`, `finish`, and `get_status`.
+`start_session` accepts an optional `provider` (`edge` or `elevenlabs`) and
+defaults to `edge`. Set `REEL_TTS_PROVIDER=elevenlabs` to make ElevenLabs the
+default provider, or select it per session. ElevenLabs requires the
+`ELEVENLABS_API_KEY` environment variable, and the `voice` value is passed as
+the ElevenLabs voice ID. No API key is needed for the default Edge provider.
 `list_sessions` and `get_session` read durable SQLite metadata, including
 finished sessions and their storyboard steps after a restart.
 For a finished session, `update_step_narration` edits one storyboard

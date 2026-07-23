@@ -23,7 +23,7 @@ from .engine import BrowserSession, output_root
 from . import store
 from .render import probe_duration, rerender_narration
 from .schema import Action
-from .tts import synthesize
+from .tts import TTSProviderError, normalize_provider, synthesize, validate_provider
 
 
 LOCAL_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -372,10 +372,13 @@ def docs_page() -> str:
     </section>
     <p class="endpoint">MCP endpoint: <code>{endpoint}</code></p>
     <h2>Tools</h2>
-    <div class="tool card"><h3><code>start_session(start_url, width, height, voice)</code></h3>
+    <div class="tool card"><h3><code>start_session(start_url, width, height, voice, provider?)</code></h3>
       <p>Launch headed Chromium and begin recording.</p>
       <p><strong>Returns:</strong> <code>{{"session_id"}}</code>. Width defaults to
-      1280, height to 720, and voice to <code>en-US-JennyNeural</code>.</p></div>
+      1280, height to 720, and voice to <code>en-US-JennyNeural</code>. TTS
+      defaults to the free <code>edge</code> provider. Set provider to
+      <code>elevenlabs</code> for premium voices; this requires
+      <code>ELEVENLABS_API_KEY</code>.</p></div>
     <div class="tool card"><h3><code>observe(session_id)</code></h3>
       <p>Capture the current screen and discover interactive elements.</p>
       <p><strong>Returns:</strong> <code>{{"screenshot_path", "url", "title",
@@ -526,9 +529,20 @@ async def bug_reports_api(request: Request) -> Response:
 async def start_session(
     start_url: str, width: int = 1280, height: int = 720,
     voice: str = "en-US-JennyNeural",
+    provider: str | None = None,
 ) -> dict:
     """Launch a headed browser and begin recording."""
-    session = await BrowserSession.create(start_url, width, height, voice)
+    try:
+        selected_provider = normalize_provider(provider)
+        validate_provider(selected_provider)
+    except TTSProviderError as exc:
+        return {
+            "ok": False,
+            "error": {"type": "tts_provider_unconfigured", "message": str(exc)},
+        }
+    session = await BrowserSession.create(
+        start_url, width, height, voice, selected_provider
+    )
     sessions[session.session_id] = session
     store.create_session(
         session.session_id,
@@ -537,6 +551,7 @@ async def start_session(
         width,
         height,
         str(session.directory),
+        selected_provider,
     )
     return {"session_id": session.session_id}
 
@@ -681,7 +696,9 @@ async def rerender(session_id: str) -> dict:
         if not narration or offset is None:
             continue
         voice = step.get("voice") or session["voice"]
-        clip = await synthesize(narration, voice, output_dir)
+        clip = await synthesize(
+            narration, voice, output_dir, session.get("provider", "edge")
+        )
         duration = probe_duration(clip)
         store.update_step_narration(
             session_id, index, narration, voice, narration_duration=duration
