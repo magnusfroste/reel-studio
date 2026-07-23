@@ -10,30 +10,33 @@ def start_recording(display: str, width: int, height: int, output: Path) -> subp
     output.parent.mkdir(parents=True, exist_ok=True)
     return subprocess.Popen(
         [
-            "ffmpeg", "-y", "-f", "x11grab", "-video_size", f"{width}x{height}",
+            "ffmpeg", "-loglevel", "error", "-nostats", "-y", "-f", "x11grab",
+            "-video_size", f"{width}x{height}",
             "-framerate", "25", "-i", f"{display}.0", "-draw_mouse", "1",
             "-pix_fmt", "yuv420p", str(output),
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
 
 
 def stop_recording(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
-    if process.stdin:
-        try:
-            process.stdin.write(b"q\n")
-            process.stdin.flush()
-        except BrokenPipeError:
-            pass
     try:
-        process.wait(timeout=15)
-    except subprocess.TimeoutExpired:
         process.send_signal(signal.SIGINT)
-        process.wait(timeout=15)
+        process.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=4)
+    finally:
+        if process.stdin:
+            process.stdin.close()
 
 
 def probe_duration(path: Path) -> float:
@@ -65,7 +68,7 @@ def mux_narration(
     filters.append(f"{labels}amix=inputs={len(clips)}:duration=longest:dropout_transition=0[a]")
     command.extend([
         "-filter_complex", ";".join(filters), "-map", "0:v", "-map", "[a]",
-        "-c:v", "copy", "-c:a", "aac", "-shortest", str(output_path),
+        "-c:v", "copy", "-c:a", "aac", str(output_path),
     ])
     subprocess.run(command, check=True)
     return output_path

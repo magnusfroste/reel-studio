@@ -56,6 +56,7 @@ class BrowserSession:
     refs: dict[str, str] = field(default_factory=dict)
     narrations: list[tuple[float, Path, str]] = field(default_factory=list)
     refs_stale: bool = True
+    runtime_closed: bool = False
 
     @classmethod
     async def create(cls, start_url: str, width: int, height: int, voice: str) -> "BrowserSession":
@@ -66,7 +67,7 @@ class BrowserSession:
         display = f":{display_number}"
         xvfb = subprocess.Popen(
             ["Xvfb", display, "-screen", "0", f"{width}x{height}x24", "-ac"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         for _ in range(50):
             if Path(f"/tmp/.X11-unix/X{display_number}").exists():
@@ -263,16 +264,36 @@ class BrowserSession:
             )), 3),
         }
 
-    async def finish(self) -> Path:
+    def _finish_media(self) -> Path:
         stop_recording(self.recorder)
         video = self.directory / "screen.mp4"
+        if not video.is_file() or video.stat().st_size == 0:
+            raise FileNotFoundError(f"Recording is missing or empty: {video}")
         final = self.directory / "video.mp4"
         mux_narration(video, [(offset, clip) for offset, clip, _ in self.narrations], final)
-        await self.browser.close()
-        await self.playwright.stop()
-        self.xvfb.terminate()
-        try:
-            self.xvfb.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.xvfb.kill()
+        if not final.is_file() or final.stat().st_size == 0:
+            raise RuntimeError("FFmpeg did not produce a playable video")
         return final
+
+    async def finish(self) -> Path:
+        try:
+            return await asyncio.to_thread(self._finish_media)
+        finally:
+            if not self.runtime_closed:
+                try:
+                    await self.browser.close()
+                except Exception:
+                    pass
+                try:
+                    await self.playwright.stop()
+                except Exception:
+                    pass
+                try:
+                    self.xvfb.terminate()
+                except Exception:
+                    pass
+                try:
+                    self.xvfb.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.xvfb.kill()
+                self.runtime_closed = True
