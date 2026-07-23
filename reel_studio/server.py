@@ -814,7 +814,11 @@ async def finish(session_id: str) -> dict:
     return {"video_path": str(video_path), "video_url": video_url}
 
 
-@mcp.custom_route("/videos/{session_id}/video.mp4", methods=["GET"], include_in_schema=False)
+@mcp.custom_route(
+    "/videos/{session_id}/video.mp4",
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+)
 async def download_video(request: Request) -> Response:
     """Serve a finished video from the configured persistent output directory."""
     session_id = request.path_params["session_id"]
@@ -835,7 +839,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         public_video = re.fullmatch(r"/videos/[^/]+/video\.mp4", request.url.path)
-        if request.method == "GET" and (
+        if request.method in {"GET", "HEAD"} and (
             request.url.path in {
                 "/",
                 "/docs",
