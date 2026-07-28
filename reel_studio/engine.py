@@ -23,6 +23,7 @@ from .render import (
     probe_duration,
     segmented_render,
     segmented_render_enabled,
+    RenderConfig,
     start_recording,
     stop_recording,
 )
@@ -53,6 +54,7 @@ class BrowserSession:
     voice: str
     provider: str
     output_size: tuple[int, int] | None
+    render_config: RenderConfig
     directory: Path
     display_number: int
     xvfb: subprocess.Popen[bytes]
@@ -77,6 +79,7 @@ class BrowserSession:
         voice: str,
         provider: str = "edge",
         output_size: tuple[int, int] | None = None,
+        render_config: RenderConfig | None = None,
     ) -> "BrowserSession":
         session_id = uuid.uuid4().hex
         directory = output_root() / session_id
@@ -128,8 +131,8 @@ class BrowserSession:
             )
         return cls(
             session_id, start_url, width, height, voice, provider, output_size,
-            directory, display_number, xvfb, playwright, browser, context, page,
-            recorder, time.monotonic(),
+            render_config or RenderConfig(), directory, display_number, xvfb,
+            playwright, browser, context, page, recorder, time.monotonic(),
         )
 
     async def capture_screenshot(self) -> Path:
@@ -428,13 +431,17 @@ class BrowserSession:
             ) from exc
         final = self.directory / "video.mp4"
         if segmented_render_enabled():
-            segmented_render(video, self.timeline, final, self.output_size)
+            segmented_render(
+                video, self.timeline, final, self.output_size,
+                self.render_config,
+            )
         else:
             mux_narration(
                 video,
                 [(offset, clip) for offset, clip, _ in self.narrations],
                 final,
                 self.output_size,
+                self.render_config,
             )
         if not final.is_file() or final.stat().st_size == 0:
             raise RuntimeError("FFmpeg did not produce a playable video")

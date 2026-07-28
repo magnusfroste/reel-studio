@@ -22,6 +22,7 @@ from starlette.types import ASGIApp
 from .engine import BrowserSession, output_root
 from . import store
 from .render import (
+    RenderConfig,
     probe_duration,
     rerender_narration,
     segmented_render,
@@ -417,6 +418,32 @@ def _resolve_output_size(
     return width, height
 
 
+def _render_config(
+    title: str,
+    subtitle: str,
+    accent: str,
+    cta_url: str,
+    cta_text: str,
+    music: str,
+) -> RenderConfig:
+    normalized_accent = accent.strip()
+    if not re.fullmatch(r"#?[0-9a-fA-F]{6}", normalized_accent):
+        normalized_accent = "#1f2a44"
+    elif not normalized_accent.startswith("#"):
+        normalized_accent = f"#{normalized_accent}"
+    normalized_music = music.strip().lower()
+    if normalized_music != "subtle":
+        normalized_music = "none"
+    return RenderConfig(
+        title=title.strip(),
+        subtitle=subtitle.strip(),
+        accent=normalized_accent,
+        cta_url=cta_url.strip(),
+        cta_text=cta_text.strip() or "Learn more",
+        music=normalized_music,
+    )
+
+
 def docs_page() -> str:
     """Render the detailed MCP and API reference."""
     endpoint = html.escape(mcp_endpoint())
@@ -429,7 +456,7 @@ def docs_page() -> str:
     </section>
     <p class="endpoint">MCP endpoint: <code>{endpoint}</code></p>
     <h2>Tools</h2>
-    <div class="tool card"><h3><code>start_session(start_url, width, height, voice, provider?, output_size?)</code></h3>
+    <div class="tool card"><h3><code>start_session(start_url, width, height, voice, provider?, output_size?, title?, subtitle?, accent?, cta_url?, cta_text?, music?)</code></h3>
       <p>Launch headed Chromium and begin recording.</p>
       <p><strong>Returns:</strong> <code>{{"session_id"}}</code>. Width defaults to
       1920, height to 1080, and voice to <code>en-US-JennyNeural</code>. The
@@ -438,7 +465,11 @@ def docs_page() -> str:
       size. <code>REEL_OUTPUT_SIZE</code> provides the same default. TTS
       defaults to the free <code>edge</code> provider. Set provider to
       <code>elevenlabs</code> for premium voices; this requires
-      <code>ELEVENLABS_API_KEY</code>.</p></div>
+      <code>ELEVENLABS_API_KEY</code>. Optional title/subtitle and
+      <code>cta_url</code>/<code>cta_text</code> add server-rendered three-second
+      intro/outro cards; <code>accent</code> controls their hex background.
+      Set <code>music</code> to <code>subtle</code> for a quiet generated music
+      bed; it defaults to <code>none</code>.</p></div>
     <div class="tool card"><h3><code>observe(session_id)</code></h3>
       <p>Capture the current screen and discover interactive elements.</p>
       <p><strong>Returns:</strong> <code>{{"screenshot_path", "url", "title",
@@ -603,6 +634,12 @@ async def start_session(
     voice: str = "en-US-JennyNeural",
     provider: str | None = None,
     output_size: str | None = None,
+    title: str = "",
+    subtitle: str = "",
+    accent: str = "#1f2a44",
+    cta_url: str = "",
+    cta_text: str = "Learn more",
+    music: str = "none",
 ) -> dict:
     """Launch a headed browser and begin recording."""
     try:
@@ -620,8 +657,12 @@ async def start_session(
             "ok": False,
             "error": {"type": "invalid_output_size", "message": str(exc)},
         }
+    render_config = _render_config(
+        title, subtitle, accent, cta_url, cta_text, music
+    )
     session = await BrowserSession.create(
-        start_url, width, height, voice, selected_provider, selected_output_size
+        start_url, width, height, voice, selected_provider, selected_output_size,
+        render_config,
     )
     sessions[session.session_id] = session
     store.create_session(
@@ -633,6 +674,12 @@ async def start_session(
         str(session.directory),
         selected_provider,
         *(selected_output_size or (None, None)),
+        render_config.title,
+        render_config.subtitle,
+        render_config.accent,
+        render_config.cta_url,
+        render_config.cta_text,
+        render_config.music,
     )
     return {"session_id": session.session_id}
 
@@ -794,6 +841,14 @@ async def rerender(session_id: str) -> dict:
     clips: list[tuple[float, Path]] = []
     render_steps: list[tuple[float, Path | None, float]] = []
     warnings = []
+    render_config = _render_config(
+        session.get("title", ""),
+        session.get("subtitle", ""),
+        session.get("accent", "#1f2a44"),
+        session.get("cta_url", ""),
+        session.get("cta_text", "Learn more"),
+        session.get("music", "none"),
+    )
     video_duration = await asyncio.to_thread(probe_duration, source_video)
     steps = session["steps"]
     for index, step in enumerate(steps):
@@ -825,7 +880,8 @@ async def rerender(session_id: str) -> dict:
             else None
         )
         result = await asyncio.to_thread(
-            segmented_render, source_video, render_steps, video_path, output_size
+            segmented_render, source_video, render_steps, video_path, output_size,
+            render_config,
         )
         warnings = result.warnings
         duration = result.duration
@@ -838,7 +894,8 @@ async def rerender(session_id: str) -> dict:
             else None
         )
         await asyncio.to_thread(
-            rerender_narration, source_video, clips, video_path, output_size
+            rerender_narration, source_video, clips, video_path, output_size,
+            render_config,
         )
         duration = await asyncio.to_thread(probe_duration, video_path)
     store.update_session_duration(session_id, duration)
