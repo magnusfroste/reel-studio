@@ -64,6 +64,11 @@ overridable. Set optional `output_size` (for example `1280x720`) to downscale
 only the final MP4 while retaining the larger capture viewport, or set
 `REEL_OUTPUT_SIZE` as the default. Without either setting, output matches the
 capture resolution.
+Optional `title` and `subtitle` add a branded three-second intro card.
+Optional `cta_url` and `cta_text` add a three-second outro card. `accent`
+sets the cards' hex background color. Set `music="subtle"` for a quiet,
+generated ambient bed; the default is `music="none"`. These settings are
+persisted with the session and are also applied during `rerender`.
 `start_session` accepts an optional `provider` (`edge` or `elevenlabs`) and
 defaults to `edge`. Set `REEL_TTS_PROVIDER=elevenlabs` to make ElevenLabs the
 default provider, or select it per session. ElevenLabs requires the

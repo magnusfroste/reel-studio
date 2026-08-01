@@ -47,6 +47,12 @@ def init_schema() -> None:
                 height INTEGER NOT NULL,
                 output_width INTEGER,
                 output_height INTEGER,
+                title TEXT NOT NULL DEFAULT '',
+                subtitle TEXT NOT NULL DEFAULT '',
+                accent TEXT NOT NULL DEFAULT '#1f2a44',
+                cta_url TEXT NOT NULL DEFAULT '',
+                cta_text TEXT NOT NULL DEFAULT 'Learn more',
+                music TEXT NOT NULL DEFAULT 'none',
                 created_at TEXT NOT NULL,
                 finished_at TEXT,
                 output_dir TEXT NOT NULL,
@@ -106,6 +112,18 @@ def init_schema() -> None:
         for column in ("output_width", "output_height"):
             if column not in session_columns:
                 connection.execute(f"ALTER TABLE sessions ADD COLUMN {column} INTEGER")
+        for column, definition in (
+            ("title", "TEXT NOT NULL DEFAULT ''"),
+            ("subtitle", "TEXT NOT NULL DEFAULT ''"),
+            ("accent", "TEXT NOT NULL DEFAULT '#1f2a44'"),
+            ("cta_url", "TEXT NOT NULL DEFAULT ''"),
+            ("cta_text", "TEXT NOT NULL DEFAULT 'Learn more'"),
+            ("music", "TEXT NOT NULL DEFAULT 'none'"),
+        ):
+            if column not in session_columns:
+                connection.execute(
+                    f"ALTER TABLE sessions ADD COLUMN {column} {definition}"
+                )
         backlog_columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(backlog)").fetchall()
@@ -134,6 +152,12 @@ def create_session(
     provider: str = "edge",
     output_width: int | None = None,
     output_height: int | None = None,
+    title: str = "",
+    subtitle: str = "",
+    accent: str = "#1f2a44",
+    cta_url: str = "",
+    cta_text: str = "Learn more",
+    music: str = "none",
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
@@ -141,12 +165,14 @@ def create_session(
             """
             INSERT INTO sessions
                 (id, start_url, status, voice, provider, width, height,
-                 output_width, output_height, created_at, output_dir)
-            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+                 output_width, output_height, title, subtitle, accent, cta_url,
+                 cta_text, music, created_at, output_dir)
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id, start_url, voice, provider, width, height,
-                output_width, output_height, _now(), output_dir,
+                output_width, output_height, title, subtitle, accent, cta_url,
+                cta_text, music, _now(), output_dir,
             ),
         )
 

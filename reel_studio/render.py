@@ -9,6 +9,20 @@ import tempfile
 from typing import Sequence
 
 
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+CARD_DURATION = 3.0
+
+
+@dataclass(frozen=True)
+class RenderConfig:
+    title: str = ""
+    subtitle: str = ""
+    accent: str = "#1f2a44"
+    cta_url: str = ""
+    cta_text: str = "Learn more"
+    music: str = "none"
+
+
 def start_recording(display: str, width: int, height: int, output: Path) -> subprocess.Popen[bytes]:
     output.parent.mkdir(parents=True, exist_ok=True)
     return subprocess.Popen(
@@ -57,9 +71,11 @@ def mux_narration(
     clips: Sequence[tuple[float, Path]],
     output_path: Path,
     output_size: tuple[int, int] | None = None,
+    config: RenderConfig | None = None,
 ) -> Path:
     """Create a delayed mixed narration track and mux it into the video."""
-    if not clips:
+    config = config or RenderConfig()
+    if not clips and not _has_branding(config) and config.music == "none":
         if output_size is None:
             video_path.replace(output_path)
         else:
@@ -74,29 +90,203 @@ def mux_narration(
             )
         return output_path
 
-    command = ["ffmpeg", "-y", "-i", str(video_path)]
+    video_duration = probe_duration(video_path)
+    with tempfile.TemporaryDirectory(
+        prefix=".continuous-", dir=output_path.parent
+    ) as temporary:
+        body_path = Path(temporary) / "body.mp4"
+        _render_video_only(video_path, body_path, output_size)
+        _compose_video(
+            body_path,
+            clips,
+            output_path,
+            video_duration,
+            output_size,
+            config,
+        )
+    return output_path
+
+
+def _render_video_only(
+    video_path: Path,
+    output_path: Path,
+    output_size: tuple[int, int] | None,
+) -> None:
+    command = ["ffmpeg", "-loglevel", "error", "-y", "-i", str(video_path)]
+    if output_size is not None:
+        command.extend([
+            "-vf", f"scale={output_size[0]}:{output_size[1]}",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        ])
+    else:
+        command.extend(["-c:v", "copy"])
+    command.extend(["-an", str(output_path)])
+    subprocess.run(command, check=True)
+
+
+def _has_branding(config: RenderConfig) -> bool:
+    return bool(config.title.strip() or config.cta_url.strip())
+
+
+def _escape_drawtext(text: str) -> str:
+    return (
+        text.replace("\\", r"\\")
+        .replace(":", r"\:")
+        .replace("'", r"\'")
+        .replace(",", r"\,")
+        .replace("%", r"\%")
+    )
+
+
+def _card(
+    output_path: Path,
+    width: int,
+    height: int,
+    accent: str,
+    lines: Sequence[tuple[str, int]],
+) -> None:
+    if not Path(FONT_PATH).is_file():
+        raise RuntimeError(f"Title-card font is missing: {FONT_PATH}")
+    drawtext = []
+    center_offset = (len(lines) - 1) * 0.7
+    for index, (text, size) in enumerate(lines):
+        drawtext.append(
+            "drawtext="
+            f"fontfile={FONT_PATH}:text='{_escape_drawtext(text)}':"
+            f"fontcolor=white:fontsize={size}:"
+            f"x=(w-text_w)/2:y=(h-text_h)/2+{index * 1.4 - center_offset}*{size}"
+        )
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i",
+            f"color=c={accent}:s={width}x{height}:r=25:d={CARD_DURATION}",
+            "-vf", ",".join(drawtext),
+            "-an", "-c:v", "libx264", "-preset", "veryfast",
+            "-pix_fmt", "yuv420p", str(output_path),
+        ],
+        check=True,
+    )
+
+
+def _compose_video(
+    body_path: Path,
+    clips: Sequence[tuple[float, Path]],
+    output_path: Path,
+    body_duration: float,
+    output_size: tuple[int, int] | None,
+    config: RenderConfig,
+) -> None:
+    width, height = output_size or probe_video_size(body_path)
+    temporary = body_path.parent
+    parts: list[Path] = []
+    intro_duration = 0.0
+    if config.title.strip():
+        intro = temporary / "intro.mp4"
+        _card(
+            intro, width, height, config.accent,
+            [(config.title.strip(), max(36, width // 22)),
+             (config.subtitle.strip(), max(20, width // 48))]
+            if config.subtitle.strip()
+            else [(config.title.strip(), max(36, width // 22))],
+        )
+        parts.append(intro)
+        intro_duration = CARD_DURATION
+    parts.append(body_path)
+    if config.cta_url.strip():
+        outro = temporary / "outro.mp4"
+        _card(
+            outro, width, height, config.accent,
+            [
+                (config.cta_text.strip() or "Learn more", max(28, width // 32)),
+                (config.cta_url.strip(), max(22, width // 44)),
+            ],
+        )
+        parts.append(outro)
+    base = temporary / "branded-base.mp4"
+    concat = temporary / "branded.txt"
+    concat.write_text("".join(f"file '{path}'\n" for path in parts))
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-y", "-f", "concat",
+            "-safe", "0", "-i", str(concat), "-c", "copy", str(base),
+        ],
+        check=True,
+    )
+    shifted = [
+        (offset + intro_duration, clip)
+        for offset, clip in clips
+    ]
+    total_duration = intro_duration + body_duration
+    if config.cta_url.strip():
+        total_duration += CARD_DURATION
+    _mux_segment_audio(
+        base, shifted, output_path, total_duration, config.music
+    )
+
+
+def probe_video_size(path: Path) -> tuple[int, int]:
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0:s=x", str(path),
+        ],
+        check=True, capture_output=True, text=True,
+    )
+    width, height = result.stdout.strip().split("x")
+    return int(width), int(height)
+
+
+def _mux_segment_audio(
+    video_path: Path,
+    clips: Sequence[tuple[float, Path]],
+    output_path: Path,
+    duration: float,
+    music: str = "none",
+) -> None:
+    command = ["ffmpeg", "-loglevel", "error", "-y", "-i", str(video_path)]
     filters: list[str] = []
     for index, (offset, clip) in enumerate(clips, start=1):
         command.extend(["-i", str(clip)])
         delay = max(0, round(offset * 1000))
         filters.append(f"[{index}:a]adelay={delay}|{delay}[a{index}]")
+    input_count = len(clips)
+    if music == "subtle":
+        command.extend([
+            "-f", "lavfi", "-i",
+            (
+                "aevalsrc=0.45*sin(2*PI*220*t)+"
+                "0.2*sin(2*PI*277*t):s=48000:"
+                f"d={duration:.3f}"
+            ),
+        ])
+        input_count += 1
+        music_index = input_count
+        filters.append(f"[{music_index}:a]volume=0.09[bed]")
     labels = "".join(f"[a{i}]" for i in range(1, len(clips) + 1))
-    filters.append(f"{labels}amix=inputs={len(clips)}:duration=longest:dropout_transition=0[a]")
-    video_map = "0:v"
-    video_codec = ["-c:v", "copy"]
-    if output_size is not None:
-        filters.insert(
-            0,
-            f"[0:v]scale={output_size[0]}:{output_size[1]}[v]",
+    if labels:
+        if music == "subtle":
+            labels += "[bed]"
+        filters.append(
+            f"{labels}amix=inputs={input_count}:duration=longest:"
+            "dropout_transition=0:normalize=0[a]"
         )
-        video_map = "[v]"
-        video_codec = ["-c:v", "libx264", "-preset", "veryfast"]
+    elif music == "subtle":
+        filters.append("[bed]anull[a]")
+    if filters:
+        command.extend(["-filter_complex", ";".join(filters), "-map", "0:v", "-map", "[a]"])
+    else:
+        command.extend([
+            "-f", "lavfi", "-i",
+            "anullsrc=channel_layout=mono:sample_rate=24000",
+            "-map", "0:v", "-map", "1:a",
+        ])
     command.extend([
-        "-filter_complex", ";".join(filters), "-map", video_map, "-map", "[a]",
-        *video_codec, "-c:a", "aac", str(output_path),
+        "-t", f"{duration:.3f}", "-c:v", "copy", "-c:a", "aac",
+        str(output_path),
     ])
     subprocess.run(command, check=True)
-    return output_path
 
 
 SEGMENT_FLOOR = 1.0
@@ -122,8 +312,10 @@ def segmented_render(
     steps: Sequence[tuple[float, Path | None, float]],
     output_path: Path,
     output_size: tuple[int, int] | None = None,
+    config: RenderConfig | None = None,
 ) -> SegmentedRenderResult:
     """Render kept step windows from the original continuous recording."""
+    config = config or RenderConfig()
     video_duration = probe_duration(video_path)
     ordered = sorted(
         (offset, clip, max(0.0, duration))
@@ -207,7 +399,13 @@ def segmented_render(
             ],
             check=True,
         )
-        _mux_segment_audio(joined, audio_clips, output_path, cumulative)
+        if _has_branding(config) or config.music == "subtle":
+            _compose_video(
+                joined, audio_clips, output_path, cumulative,
+                output_size, config,
+            )
+        else:
+            _mux_segment_audio(joined, audio_clips, output_path, cumulative)
     return SegmentedRenderResult(output_path, probe_duration(output_path), warnings)
 
 
@@ -241,45 +439,15 @@ def _render_video_segment(
     return output_path
 
 
-def _mux_segment_audio(
-    video_path: Path,
-    clips: Sequence[tuple[float, Path]],
-    output_path: Path,
-    duration: float,
-) -> None:
-    command = ["ffmpeg", "-loglevel", "error", "-y", "-i", str(video_path)]
-    if clips:
-        filters: list[str] = []
-        for index, (offset, clip) in enumerate(clips, start=1):
-            command.extend(["-i", str(clip)])
-            delay = max(0, round(offset * 1000))
-            filters.append(f"[{index}:a]adelay={delay}|{delay}[a{index}]")
-        labels = "".join(f"[a{i}]" for i in range(1, len(clips) + 1))
-        filters.append(
-            f"{labels}amix=inputs={len(clips)}:duration=longest:"
-            "dropout_transition=0[a]"
-        )
-        command.extend([
-            "-filter_complex", ";".join(filters),
-            "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
-            str(output_path),
-        ])
-    else:
-        command.extend([
-            "-f", "lavfi", "-i", "anullsrc=channel_layout=mono:sample_rate=24000",
-            "-map", "0:v", "-map", "1:a", "-t", f"{duration:.3f}",
-            "-c:v", "copy", "-c:a", "aac", str(output_path),
-        ])
-    subprocess.run(command, check=True)
-
-
 def rerender_narration(
     video_path: Path,
     clips: Sequence[tuple[float, Path]],
     output_path: Path,
     output_size: tuple[int, int] | None = None,
+    config: RenderConfig | None = None,
 ) -> Path:
     """Replace a video's audio with delayed narration, extending its last frame if needed."""
+    config = config or RenderConfig()
     video_duration = probe_duration(video_path)
     temp_path = output_path.with_name(f".{output_path.stem}.rerender.mp4")
     if not clips:
@@ -296,7 +464,14 @@ def rerender_narration(
             str(temp_path),
         ]
         subprocess.run(command, check=True)
-        temp_path.replace(output_path)
+        if _has_branding(config) or config.music == "subtle":
+            _compose_video(
+                temp_path, clips, output_path, video_duration,
+                output_size, config,
+            )
+            temp_path.unlink(missing_ok=True)
+        else:
+            temp_path.replace(output_path)
         return output_path
 
     clip_durations = [(offset, clip, probe_duration(clip)) for offset, clip in clips]
@@ -342,5 +517,12 @@ def rerender_narration(
         *video_codec, "-c:a", "aac", str(temp_path),
     ])
     subprocess.run(command, check=True)
-    temp_path.replace(output_path)
+    if _has_branding(config) or config.music == "subtle":
+        _compose_video(
+            temp_path, clips, output_path,
+            max(video_duration, audio_end), output_size, config,
+        )
+        temp_path.unlink(missing_ok=True)
+    else:
+        temp_path.replace(output_path)
     return output_path

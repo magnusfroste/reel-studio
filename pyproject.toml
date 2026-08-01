@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "MCP server for directing narrated browser screen recordings"
 requires-python = ">=3.10"
 dependencies = [
-  "mcp",
+  "mcp>=1.28,<2",
   "playwright",
   "edge-tts",
   "pydantic>=2",
