@@ -9,10 +9,15 @@ description = "MCP server for directing narrated browser screen recordings"
 requires-python = ">=3.10"
 dependencies = [
   "mcp>=1.28,<2",
-  "playwright",
-  "edge-tts",
-  "pydantic>=2",
-  "uvicorn",
+  "playwright>=1.61,<2",
+  "edge-tts>=7.2.8,<8",
+  "pydantic>=2.13.4,<3",
+  "uvicorn>=0.51,<1",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest",
 ]
 
 [tool.setuptools.packages.find]
