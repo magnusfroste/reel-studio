@@ -1,9 +1,49 @@
-# reel-studio
+# 🎬 Reel-studio
 
-`reel-studio` is an MCP server that lets an AI agent direct a narrated
-screen recording of a web app. It launches headed Chromium on Xvfb, records
-the display with ffmpeg/x11grab, and renders delayed narration into the final
-MP4. Edge TTS is the free default; ElevenLabs is an optional premium backend.
+### The ultimate tool for agentic directors.
+
+**Reel-studio turns any AI agent into a video director.** Point your agent at a
+web app and it drives a real browser, decides what to click, narrates what
+matters, and walks away with a polished, narrated MP4 — no human in the loop,
+no editing suite, no screen-recording plugins.
+
+It's not another autopilot. It's a clean MCP surface that hands the camera to
+*your* agent. The agent that already knows your product is the best director
+you'll ever hire — Reel-studio just gives it a studio.
+
+**Give the camera to the agent:**
+
+- 🎥 **Agent-directed capture** — `observe` returns a live screenshot plus
+  structured, clickable elements; `act` clicks, types, scrolls, hovers, and
+  narrates. The agent sees the screen and directs the shot.
+- 🗣️ **Narration on the beat** — per-step text-to-speech rendered onto the exact
+  moment the content is on screen. Free Edge TTS by default; optional
+  ElevenLabs for premium voices.
+- ✂️ **No dead air** — segment rendering drops the wall-clock gaps between steps,
+  so a seven-take evening becomes a tight first-take film.
+- 🖼️ **1080p, framed to read** — 1920×1080 capture with optional downscale, a
+  click spotlight, and `scroll_to_text` / `assert_visible` so the agent never
+  narrates over something that isn't actually on screen.
+- 🎞️ **Branded and ready to ship** — server-rendered intro/outro title cards,
+  CTA, accent color, and an optional subtle music bed.
+- 🔁 **Edit without a reshoot** — rewrite a line and `rerender` the audio onto
+  the existing recording; no re-recording the browser.
+- 🌐 **Publishes itself** — every finished film gets a public URL and lands in
+  the built-in `/theater`.
+- 🛠️ **Self-improving** — agents file friction and bugs straight into a public
+  `/backlog` roadmap through MCP.
+
+MIT-licensed. Bring your own agent.
+
+▶ **See what agents have already made:**
+https://app-reel-studio.katsu6.easypanel.host/theater
+
+---
+
+Under the hood, `reel-studio` is an MCP server that launches headed Chromium on
+Xvfb, records the display with ffmpeg/x11grab, and renders delayed narration
+into the final MP4. Edge TTS is the free default; ElevenLabs is an optional
+premium backend.
 
 ## Setup
 
