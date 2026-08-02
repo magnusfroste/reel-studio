@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -22,6 +24,7 @@ from starlette.types import ASGIApp
 from .engine import BrowserSession, output_root
 from . import store
 from .render import (
+    FONT_PATH,
     RenderConfig,
     probe_duration,
     rerender_narration,
@@ -145,14 +148,51 @@ PAGE_STYLES = """
 """
 
 
-def page_shell(title: str, content: str) -> str:
+FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<rect width="32" height="32" rx="7" fill="#1f2a44"/>
+<path fill="#edf1f7" d="M7 9h18v14H7zM9 7h5l-2 5H7zm8 0h5l-2 5h-5zm-5 15h8v2h-8z"/>
+<circle cx="11" cy="16" r="2" fill="#1f2a44"/><circle cx="21" cy="16" r="2" fill="#1f2a44"/>
+</svg>"""
+
+
+def page_shell(
+    title: str,
+    content: str,
+    description: str = "",
+    canonical_path: str = "/",
+    base_url: str = "",
+    structured_data: str = "",
+) -> str:
     """Wrap public page content in the shared landing/docs layout."""
+    escaped_title = html.escape(title)
+    escaped_description = html.escape(description, quote=True)
+    canonical_url = html.escape(
+        f"{base_url.rstrip('/')}{canonical_path}", quote=True
+    )
+    og_image = html.escape(f"{base_url.rstrip('/')}/og.png", quote=True)
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title} · reel-studio</title>
+  <title>{escaped_title} · reel-studio</title>
+  <meta name="description" content="{escaped_description}">
+  <link rel="canonical" href="{canonical_url}">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="alternate icon" href="/favicon.png" type="image/png">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="reel-studio">
+  <meta property="og:title" content="{escaped_title} · reel-studio">
+  <meta property="og:description" content="{escaped_description}">
+  <meta property="og:url" content="{canonical_url}">
+  <meta property="og:image" content="{og_image}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{escaped_title} · reel-studio">
+  <meta name="twitter:description" content="{escaped_description}">
+  <meta name="twitter:image" content="{og_image}">
+  {structured_data}
   <style>{PAGE_STYLES}</style>
 </head>
 <body>
@@ -167,6 +207,130 @@ def page_shell(title: str, content: str) -> str:
 def mcp_endpoint() -> str:
     public_base_url = os.environ.get("REEL_PUBLIC_BASE_URL", "").rstrip("/")
     return f"{public_base_url}/mcp" if public_base_url else "/mcp"
+
+
+def build_llms_txt(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    return f"""# reel-studio
+
+reel-studio turns any AI agent into a video director for narrated browser tutorials.
+Bring your own agent: observe the UI, direct deliberate actions, narrate the story,
+and finish a polished MP4.
+
+## MCP
+
+Endpoint: {base}/mcp
+Authentication: `Authorization: Bearer <REEL_API_TOKEN>`
+
+Core loop: `start_session` → `observe` → `act` with optional narration → `finish`.
+Core tools include `start_session`, `observe`, `act`, `finish`, `get_status`,
+`get_session`, and `list_sessions`.
+
+Optional `start_session` branding parameters: `title`, `subtitle`, `accent`,
+`cta_url`, `cta_text`, and `music` (`none` or `subtle`).
+Target text reliably with `scroll_to_text` and non-recording `assert_visible`.
+Edit finished narration with `update_step_narration`, then use `rerender`.
+
+## Public resources
+
+- `/theater` — finished narrated videos
+- `/backlog` and `/bug_report` — public roadmap and bug reports
+- `/docs` — detailed API documentation
+- `/api/videos`, `/api/backlog`, `/api/bug_reports` — JSON feeds
+
+"""
+
+
+def build_sitemap(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    paths = ["/", "/theater", "/backlog", "/bug_report", "/docs"]
+    urls = "\n".join(
+        f"  <url><loc>{html.escape(base + path)}</loc></url>"
+        for path in paths
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        f"{urls}\n"
+        "</urlset>\n"
+    )
+
+
+def build_robots(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    return (
+        "User-agent: *\n"
+        "Allow: /\n"
+        f"Sitemap: {base}/sitemap.xml\n"
+        f"Agents: {base}/llms.txt\n"
+    )
+
+
+def _asset_cache_dir() -> Path:
+    try:
+        directory = output_root() / ".public-assets"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+    except OSError:
+        directory = Path(tempfile.gettempdir()) / "reel-studio-public-assets"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+
+def _drawtext_escape(text: str) -> str:
+    return (
+        text.replace("\\", r"\\")
+        .replace(":", r"\:")
+        .replace("'", r"\'")
+        .replace(",", r"\,")
+        .replace("%", r"\%")
+    )
+
+
+def _generate_png_asset(path: Path, width: int, height: int) -> None:
+    if not Path(FONT_PATH).is_file():
+        raise RuntimeError(f"Asset font is missing: {FONT_PATH}")
+    if width == 32:
+        filters = (
+            f"drawtext=fontfile={FONT_PATH}:text='R':fontcolor=white:"
+            "fontsize=22:x=(w-text_w)/2:y=(h-text_h)/2"
+        )
+        source = f"color=c=#1f2a44:s={width}x{height}:r=1:d=1"
+    else:
+        filters = ",".join(
+            [
+                f"drawtext=fontfile={FONT_PATH}:text='Reel-studio':"
+                "fontcolor=white:fontsize=92:x=80:y=170",
+                f"drawtext=fontfile={FONT_PATH}:text='The ultimate tool for agentic directors':"
+                "fontcolor=#b9c8ff:fontsize=38:x=84:y=300",
+                f"drawtext=fontfile={FONT_PATH}:text='narrated browser tutorials, directed by AI agents':"
+                "fontcolor=#9eb1ff:fontsize=24:x=86:y=535",
+            ]
+        )
+        source = f"color=c=#1f2a44:s={width}x{height}:r=1:d=1"
+    temporary = path.with_suffix(".tmp.png")
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", source,
+            "-vf", filters, "-frames:v", "1", str(temporary),
+        ],
+        check=True,
+    )
+    temporary.replace(path)
+
+
+def favicon_png_path() -> Path:
+    path = _asset_cache_dir() / "favicon.png"
+    if not path.is_file():
+        _generate_png_asset(path, 32, 32)
+    return path
+
+
+def og_image_path() -> Path:
+    path = _asset_cache_dir() / "og.png"
+    if not path.is_file():
+        _generate_png_asset(path, 1200, 630)
+    return path
 
 
 def video_url(session_id: str) -> str:
@@ -243,7 +407,7 @@ def video_refresh_script(container_id: str, featured: bool = False) -> str:
     </script>"""
 
 
-def landing_page() -> str:
+def landing_page(base_url: str = "/") -> str:
     """Render the marketing landing page without exposing credentials."""
     endpoint = html.escape(mcp_endpoint())
     latest = store.list_finished_sessions()[:1]
@@ -291,10 +455,34 @@ def landing_page() -> str:
     <p class="muted">Use the server's <code>REEL_API_TOKEN</code> as the
     placeholder. Never commit or share the real token.</p>
     """
-    return page_shell("Autonomous product demos", content)
+    description = (
+        "Turn any AI agent into a video director for narrated browser tutorials "
+        "and polished product demos."
+    )
+    structured_data = (
+        '<script type="application/ld+json">'
+        + json.dumps({
+            "@context": "https://schema.org",
+            "@type": "SoftwareApplication",
+            "name": "reel-studio",
+            "applicationCategory": [
+                "DeveloperApplication",
+                "MultimediaApplication",
+            ],
+            "operatingSystem": "Any",
+            "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+            "description": description,
+            "url": base_url.rstrip("/") + "/",
+        })
+        + "</script>"
+    )
+    return page_shell(
+        "Autonomous product demos", content, description, "/", base_url,
+        structured_data,
+    )
 
 
-def theater_page() -> str:
+def theater_page(base_url: str = "/") -> str:
     """Render the public showcase of finished videos."""
     videos = store.list_finished_sessions()
     cards = "".join(video_card(video) for video in videos)
@@ -312,7 +500,13 @@ def theater_page() -> str:
     </div>
     {video_refresh_script("theater-videos")}
     """
-    return page_shell("Public video theater", content)
+    return page_shell(
+        "Public video theater",
+        content,
+        "Watch narrated browser tutorials directed entirely by AI agents.",
+        "/theater",
+        base_url,
+    )
 
 
 def backlog_item(item: dict) -> str:
@@ -356,7 +550,7 @@ def backlog_status_summary(items: list[dict]) -> str:
     )
 
 
-def backlog_page() -> str:
+def backlog_page(base_url: str = "/") -> str:
     """Render the public agent-improvement roadmap."""
     items = store.list_backlog()
     cards = "".join(backlog_item(item) for item in items)
@@ -374,10 +568,16 @@ def backlog_page() -> str:
       {cards}
     </div>
     """
-    return page_shell("Agent backlog", content)
+    return page_shell(
+        "Agent backlog",
+        content,
+        "Explore the open roadmap of improvements requested by directing agents.",
+        "/backlog",
+        base_url,
+    )
 
 
-def bug_report_page() -> str:
+def bug_report_page(base_url: str = "/") -> str:
     """Render the public bug-report roadmap."""
     items = store.list_backlog(category="bug")
     cards = "".join(backlog_item(item) for item in items)
@@ -395,7 +595,13 @@ def bug_report_page() -> str:
       {cards}
     </div>
     """
-    return page_shell("Public bug reports", content)
+    return page_shell(
+        "Public bug reports",
+        content,
+        "Track known reel-studio bugs found while directing real product stories.",
+        "/bug_report",
+        base_url,
+    )
 
 
 def _resolve_output_size(
@@ -444,7 +650,7 @@ def _render_config(
     )
 
 
-def docs_page() -> str:
+def docs_page(base_url: str = "/") -> str:
     """Render the detailed MCP and API reference."""
     endpoint = html.escape(mcp_endpoint())
     content = f"""
@@ -560,19 +766,67 @@ def docs_page() -> str:
     the relative <code>video_url</code> directly without a token.</p>
     <p><a href="/">← Back to the reel-studio overview</a></p>
     """
-    return page_shell("MCP and API docs", content)
+    content += '<p class="muted">Agent brief: <a href="/llms.txt">/llms.txt</a></p>'
+    return page_shell(
+        "MCP and API docs",
+        content,
+        "Learn how AI agents use reel-studio to direct narrated browser tutorials.",
+        "/docs",
+        base_url,
+    )
 
 
 @mcp.custom_route("/", methods=["GET"], include_in_schema=False)
 async def home(request: Request) -> Response:
     """Serve the public marketing landing page."""
-    return HTMLResponse(landing_page())
+    base = str(request.base_url).rstrip("/")
+    return HTMLResponse(landing_page(base))
 
 
 @mcp.custom_route("/docs", methods=["GET"], include_in_schema=False)
 async def docs(request: Request) -> Response:
     """Serve the public MCP and API documentation."""
-    return HTMLResponse(docs_page())
+    base = str(request.base_url).rstrip("/")
+    return HTMLResponse(docs_page(base))
+
+
+@mcp.custom_route("/favicon.svg", methods=["GET"], include_in_schema=False)
+async def favicon_svg(request: Request) -> Response:
+    """Serve the inline brand favicon."""
+    return Response(FAVICON_SVG, media_type="image/svg+xml")
+
+
+@mcp.custom_route("/favicon.png", methods=["GET"], include_in_schema=False)
+async def favicon_png(request: Request) -> Response:
+    """Serve the cached raster favicon."""
+    return FileResponse(favicon_png_path(), media_type="image/png")
+
+
+@mcp.custom_route("/og.png", methods=["GET"], include_in_schema=False)
+async def og_image(request: Request) -> Response:
+    """Serve the cached social-share image."""
+    return FileResponse(og_image_path(), media_type="image/png")
+
+
+@mcp.custom_route("/robots.txt", methods=["GET"], include_in_schema=False)
+async def robots(request: Request) -> Response:
+    """Serve crawler guidance with a domain-local sitemap and agent brief."""
+    base = str(request.base_url).rstrip("/")
+    return Response(build_robots(base), media_type="text/plain")
+
+
+@mcp.custom_route("/sitemap.xml", methods=["GET"], include_in_schema=False)
+async def sitemap(request: Request) -> Response:
+    """Serve the public static-page sitemap."""
+    base = str(request.base_url).rstrip("/")
+    return Response(build_sitemap(base), media_type="application/xml")
+
+
+@mcp.custom_route("/llms.txt", methods=["GET"], include_in_schema=False)
+async def llms(request: Request) -> Response:
+    """Serve the concise agent-facing service brief."""
+    base = str(request.base_url).rstrip("/")
+    return Response(build_llms_txt(base), media_type="text/plain")
 
 
 @mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
@@ -584,7 +838,8 @@ async def health(request: Request) -> Response:
 @mcp.custom_route("/theater", methods=["GET"], include_in_schema=False)
 async def theater(request: Request) -> Response:
     """Serve the public finished-video showcase."""
-    return HTMLResponse(theater_page())
+    base = str(request.base_url).rstrip("/")
+    return HTMLResponse(theater_page(base))
 
 
 @mcp.custom_route("/api/videos", methods=["GET"], include_in_schema=False)
@@ -607,7 +862,8 @@ async def videos_api(request: Request) -> Response:
 @mcp.custom_route("/backlog", methods=["GET"], include_in_schema=False)
 async def backlog(request: Request) -> Response:
     """Serve the public agent-improvement roadmap."""
-    return HTMLResponse(backlog_page())
+    base = str(request.base_url).rstrip("/")
+    return HTMLResponse(backlog_page(base))
 
 
 @mcp.custom_route("/api/backlog", methods=["GET"], include_in_schema=False)
@@ -619,7 +875,8 @@ async def backlog_api(request: Request) -> Response:
 @mcp.custom_route("/bug_report", methods=["GET"], include_in_schema=False)
 async def bug_report(request: Request) -> Response:
     """Serve the public bug-report roadmap."""
-    return HTMLResponse(bug_report_page())
+    base = str(request.base_url).rstrip("/")
+    return HTMLResponse(bug_report_page(base))
 
 
 @mcp.custom_route("/api/bug_reports", methods=["GET"], include_in_schema=False)
@@ -1038,6 +1295,12 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             request.url.path in {
                 "/",
                 "/docs",
+                "/favicon.svg",
+                "/favicon.png",
+                "/og.png",
+                "/robots.txt",
+                "/sitemap.xml",
+                "/llms.txt",
                 "/health",
                 "/theater",
                 "/api/videos",

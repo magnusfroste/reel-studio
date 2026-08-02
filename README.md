@@ -77,7 +77,10 @@ HTTP serves a public marketing landing page at `/`, detailed API docs at
 `/api/videos`, a public agent backlog at `/backlog` with JSON feed at
 `/api/backlog`, public bug reports at `/bug_report` with JSON feed at
 `/api/bug_reports`, a public JSON health check at `/health`, MCP at `/mcp`, and
-finished videos at `/videos/{session_id}/video.mp4`. MCP requests require
+finished videos at `/videos/{session_id}/video.mp4`. Branding and discovery
+assets are available at `/favicon.svg`, `/favicon.png`, and `/og.png`; crawler
+and agent guidance is available at `/robots.txt`, `/sitemap.xml`, and
+`/llms.txt`. MCP requests require
 `Authorization: Bearer <REEL_API_TOKEN>`; finished videos are public by
 default. `REEL_OUTPUT_DIR` defaults to
 `/home/ubuntu/.video-director/sessions`; set it to a persistent volume path
