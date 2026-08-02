@@ -316,13 +316,22 @@ def list_finished_sessions() -> list[dict[str, Any]]:
     with _lock, _connect() as connection:
         rows = connection.execute(
             """
-            SELECT id, start_url, duration_seconds, finished_at, video_path, video_url
+            SELECT id, start_url, duration_seconds, finished_at, video_path,
+                   video_url, output_dir
             FROM sessions
             WHERE status = 'finished'
             ORDER BY finished_at DESC, created_at DESC
             """
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def delete_session(session_id: str) -> None:
+    """Delete a session and its storyboard steps atomically."""
+    init_schema()
+    with _lock, _connect() as connection:
+        connection.execute("DELETE FROM steps WHERE session_id = ?", (session_id,))
+        connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
 
 def create_backlog(
