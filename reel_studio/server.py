@@ -23,6 +23,7 @@ from starlette.types import ASGIApp
 
 from .engine import BrowserSession, output_root
 from . import store
+from . import retention
 from .render import (
     FONT_PATH,
     RenderConfig,
@@ -230,6 +231,8 @@ Optional `start_session` branding parameters: `title`, `subtitle`, `accent`,
 `cta_url`, `cta_text`, and `music` (`none` or `subtle`).
 Target text reliably with `scroll_to_text` and non-recording `assert_visible`.
 Edit finished narration with `update_step_narration`, then use `rerender`.
+Storage retention uses `REEL_MAX_CLIPS` and `REEL_KEEP_RAW_CLIPS`; call the
+token-protected `prune` tool to clean old finished sessions manually.
 
 ## Public resources
 
@@ -747,6 +750,21 @@ def docs_page(base_url: str = "/") -> str:
       <p>Stop recording, mix narration, and render the final MP4.</p>
       <p><strong>Returns:</strong> <code>{{"video_path", "video_url"}}</code>.
       The URL is present when <code>REEL_PUBLIC_BASE_URL</code> is configured.</p></div>
+    <div class="tool card"><h3><code>prune(max_clips?, keep_raw_clips?)</code></h3>
+      <p>Run best-effort storage cleanup. <code>max_clips</code> keeps the
+      newest finished sessions and removes older session directories and
+      metadata. <code>keep_raw_clips</code> keeps <code>screen.mp4</code> only
+      for the newest sessions; final public videos remain available after raw
+      recordings are removed. Omitted values use
+      <code>REEL_MAX_CLIPS</code> (default 50) and
+      <code>REEL_KEEP_RAW_CLIPS</code> (default 0, keep all retained raw
+      recordings).</p>
+      <p><code>REEL_MAX_CLIPS</code> defaults to <code>50</code>; set it to
+      <code>0</code> to disable pruning. <code>REEL_KEEP_RAW_CLIPS</code>
+      defaults to <code>0</code>, retaining raw recordings for every retained
+      session. Removing raw recordings preserves the public video but makes
+      rerender unavailable.</p>
+    </div>
     <h2>The storyboard workflow</h2>
     <p>Give the agent a product story, then let it loop: call
     <code>observe</code>, choose one useful next step, call <code>act</code>
@@ -1262,8 +1280,28 @@ async def finish(session_id: str) -> dict:
         video_url,
         duration,
     )
+    try:
+        await asyncio.to_thread(retention.prune_from_env)
+    except Exception:
+        pass
     sessions.pop(session_id, None)
     return {"video_path": str(video_path), "video_url": video_url}
+
+
+@mcp.tool()
+async def prune(
+    max_clips: int | None = None,
+    keep_raw_clips: int | None = None,
+) -> dict:
+    """Prune finished session media using configured or supplied limits."""
+    configured_max, configured_raw = retention.retention_settings()
+    if max_clips is None:
+        max_clips = configured_max
+    if keep_raw_clips is None:
+        keep_raw_clips = configured_raw
+    return await asyncio.to_thread(
+        retention.prune_storage, max_clips, keep_raw_clips
+    )
 
 
 @mcp.custom_route(

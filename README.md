@@ -117,6 +117,13 @@ defaults to `edge`. Set `REEL_TTS_PROVIDER=elevenlabs` to make ElevenLabs the
 default provider, or select it per session. ElevenLabs requires the
 `ELEVENLABS_API_KEY` environment variable, and the `voice` value is passed as
 the ElevenLabs voice ID. No API key is needed for the default Edge provider.
+Set `REEL_MAX_CLIPS` to the number of newest finished sessions to retain
+(default `50`; `0` disables full-session pruning). Set
+`REEL_KEEP_RAW_CLIPS` to retain `screen.mp4` for only the newest retained
+sessions (default `0`, which keeps raw recordings for all retained sessions);
+older retained sessions keep their public `video.mp4` but cannot be rerendered.
+The token-gated `prune` tool runs this cleanup on demand, and successful
+`finish` calls run it automatically.
 `list_sessions` and `get_session` read durable SQLite metadata, including
 finished sessions and their storyboard steps after a restart.
 The token-gated `submit_backlog`, `list_backlog`, and `update_backlog` tools
