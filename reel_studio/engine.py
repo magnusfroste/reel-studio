@@ -146,6 +146,28 @@ class BrowserSession:
     async def _stable_selector(self, item: Locator) -> str:
         return await item.evaluate(
             """(el) => {
+                const escape = (value) => {
+                    if (globalThis.CSS && CSS.escape) return CSS.escape(value);
+                    return value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+                };
+                const tag = el.tagName.toLowerCase();
+                const id = el.getAttribute('id');
+                if (id && document.querySelectorAll(`#${escape(id)}`).length === 1) {
+                    return `#${escape(id)}`;
+                }
+                for (const attribute of ['data-testid', 'aria-label', 'name', 'placeholder']) {
+                    const value = el.getAttribute(attribute);
+                    if (!value) continue;
+                    const selector = `${tag}[${attribute}=${JSON.stringify(value)}]`;
+                    if (document.querySelectorAll(selector).length === 1) return selector;
+                }
+                const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+                if (text && ['a', 'button', 'label', '[role=button]'].some((role) =>
+                    role === tag || role === '[role=button]' && el.getAttribute('role') === 'button'
+                )) {
+                    const shortText = text.slice(0, 120).replace(/"/g, '\\"');
+                    return `${tag}:has-text("${shortText}")`;
+                }
                 const parts = [];
                 while (el && el.nodeType === 1 && el !== document.body) {
                     let index = 1;
