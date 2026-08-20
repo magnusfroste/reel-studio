@@ -79,6 +79,24 @@ def init_schema() -> None:
             );
             CREATE INDEX IF NOT EXISTS steps_session_idx
                 ON steps (session_id, idx);
+            CREATE TABLE IF NOT EXISTS shots (
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                shot_idx INTEGER NOT NULL,
+                shot_id TEXT NOT NULL,
+                intent TEXT NOT NULL,
+                framing TEXT NOT NULL,
+                zoom REAL,
+                focus_ref TEXT,
+                focus_text TEXT,
+                status TEXT NOT NULL DEFAULT 'planned',
+                verified INTEGER,
+                verification_note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, shot_id)
+            );
+            CREATE INDEX IF NOT EXISTS shots_session_idx
+                ON shots (session_id, shot_idx);
             CREATE TABLE IF NOT EXISTS backlog (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -430,6 +448,69 @@ def update_backlog(
     return dict(row)
 
 
+def begin_shot(
+    session_id: str,
+    shot_id: str,
+    intent: str,
+    framing: str,
+    zoom: float | None = None,
+    focus_ref: str | None = None,
+    focus_text: str | None = None,
+) -> dict[str, Any]:
+    """Persist a director's planned shot for a session."""
+    init_schema()
+    now = _now()
+    with _lock, _connect() as connection:
+        next_idx = connection.execute(
+            "SELECT COALESCE(MAX(shot_idx) + 1, 0) FROM shots WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO shots
+                (session_id, shot_idx, shot_id, intent, framing, zoom, focus_ref,
+                 focus_text, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
+            """,
+            (session_id, next_idx, shot_id, intent, framing, zoom, focus_ref,
+             focus_text, now, now),
+        )
+    return get_shot(session_id, shot_id) or {}
+
+
+def get_shot(session_id: str, shot_id: str) -> dict[str, Any] | None:
+    init_schema()
+    with _lock, _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM shots WHERE session_id = ? AND shot_id = ?",
+            (session_id, shot_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def verify_shot(
+    session_id: str,
+    shot_id: str,
+    verified: bool,
+    verification_note: str = "",
+) -> dict[str, Any]:
+    """Record whether a planned shot met its visual teaching criterion."""
+    init_schema()
+    status = "verified" if verified else "needs_review"
+    with _lock, _connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE shots
+            SET status = ?, verified = ?, verification_note = ?, updated_at = ?
+            WHERE session_id = ? AND shot_id = ?
+            """,
+            (status, int(verified), verification_note.strip(), _now(), session_id, shot_id),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"unknown shot: {shot_id}")
+    return get_shot(session_id, shot_id) or {}
+
+
 def get_session(session_id: str) -> dict[str, Any] | None:
     init_schema()
     with _lock, _connect() as connection:
@@ -442,8 +523,13 @@ def get_session(session_id: str) -> dict[str, Any] | None:
             "SELECT * FROM steps WHERE session_id = ? ORDER BY idx",
             (session_id,),
         ).fetchall()
+        shots = connection.execute(
+            "SELECT * FROM shots WHERE session_id = ? ORDER BY shot_idx",
+            (session_id,),
+        ).fetchall()
     result = dict(session)
     result["steps"] = [dict(step) for step in steps]
+    result["shots"] = [dict(shot) for shot in shots]
     return result
 
 

@@ -232,6 +232,7 @@ confirm=true)`; this deletes media and metadata for only that session.
 Optional `start_session` branding parameters: `title`, `subtitle`, `accent`,
 `cta_url`, `cta_text`, and `music` (`none` or `subtle`).
 Target text reliably with `scroll_to_text` and non-recording `assert_visible`.
+The director can declare and verify shot intent with `begin_shot` and `verify_shot`.
 Observed refs are semantic (for example `button:new-contact`) rather than
 position-only indexes. Use `select_option` for native/custom dropdowns and
 `press_key` for keyboard-driven controls.
@@ -720,7 +721,15 @@ def docs_page(base_url: str = "/") -> str:
     <div class="tool card"><h3><code>get_session(session_id)</code></h3>
       <p>Returns the stored session row and ordered storyboard steps. Finished
       metadata remains available after a server restart; abandoned active
-      sessions are reported as stale and are not resumed.</p></div>
+      sessions are reported as stale and are not resumed. The response also
+      includes director storyboard shots.</p></div>
+    <div class="tool card"><h3><code>begin_shot(session_id, shot_id, intent, framing, zoom?, focus_ref?, focus_text?)</code></h3>
+      <p>Declare the director's intent before recording a scene. Framing is
+      <code>wide</code>, <code>medium</code>, or <code>close</code>; zoom must be
+      between <code>0.5</code> and <code>2.0</code>.</p></div>
+    <div class="tool card"><h3><code>verify_shot(session_id, shot_id, verified, verification_note?)</code></h3>
+      <p>Record whether the intended focus was visible, readable, and aligned
+      with the narration. Failed shots become <code>needs_review</code>.</p></div>
     <div class="tool card"><h3><code>update_step_narration(session_id, index, narration, voice?)</code></h3>
       <p>Replace the narration text (and optionally the voice) for one step
       in a finished session. The recorded browser video is not changed.</p>
@@ -1059,6 +1068,52 @@ async def get_session(session_id: str) -> dict:
     if session is None:
         raise KeyError(f"Unknown session_id: {session_id}")
     return session
+
+
+@mcp.tool()
+async def begin_shot(
+    session_id: str,
+    shot_id: str,
+    intent: str,
+    framing: str,
+    zoom: float | None = None,
+    focus_ref: str | None = None,
+    focus_text: str | None = None,
+) -> dict:
+    """Declare a director storyboard shot before recording it."""
+    if store.get_session(session_id) is None:
+        return {"ok": False, "error": {"type": "unknown_session", "message": session_id}}
+    framing = framing.strip().lower()
+    if framing not in {"wide", "medium", "close"}:
+        return {"ok": False, "error": {"type": "invalid_framing", "message": framing}}
+    if zoom is not None and not 0.5 <= zoom <= 2.0:
+        return {"ok": False, "error": {"type": "invalid_zoom", "message": "zoom must be 0.5-2.0"}}
+    if not intent.strip() or not shot_id.strip():
+        return {"ok": False, "error": {"type": "invalid_shot", "message": "shot_id and intent are required"}}
+    try:
+        shot = store.begin_shot(
+            session_id, shot_id.strip(), intent.strip(), framing, zoom,
+            focus_ref.strip() if focus_ref else None,
+            focus_text.strip() if focus_text else None,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": {"type": "shot_error", "message": str(exc)}}
+    return {"ok": True, "shot": shot}
+
+
+@mcp.tool()
+async def verify_shot(
+    session_id: str,
+    shot_id: str,
+    verified: bool,
+    verification_note: str = "",
+) -> dict:
+    """Record whether a storyboard shot met its teaching criterion."""
+    try:
+        shot = store.verify_shot(session_id, shot_id.strip(), verified, verification_note)
+    except ValueError as exc:
+        return {"ok": False, "error": {"type": "shot_not_found", "message": str(exc)}}
+    return {"ok": True, "shot": shot}
 
 
 def _editable_session(session_id: str) -> tuple[dict | None, dict | None]:
