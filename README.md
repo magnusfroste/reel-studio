@@ -136,6 +136,9 @@ narration and `rerender` rebuilds only the audio track onto the existing
 recorded video without re-recording the browser. Overlapping narration is
 reported as warnings; audio that exceeds the original timeline extends the
 last video frame.
+`delete_session(session_id, confirm=true)` removes one finished session's
+media and metadata without pruning unrelated videos. Confirmation is required
+and active sessions cannot be deleted.
 `observe` and `act` return structured feedback plus a viewable screenshot.
 `observe` also includes truncated visible `page_text` so agents can verify
 plain page content such as table rows without reading the image.

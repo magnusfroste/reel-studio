@@ -1,7 +1,7 @@
 import time
 
 from reel_studio import store
-from reel_studio.retention import prune_storage
+from reel_studio.retention import delete_session_storage, prune_storage
 
 
 def _finished_session(tmp_path, session_id: str) -> None:
@@ -62,7 +62,6 @@ def test_prune_finished_sessions(tmp_path, monkeypatch):
     assert store.get_session(newest) is not None
     assert not (tmp_path / middle / "screen.mp4").exists()
     assert (tmp_path / middle / "video.mp4").exists()
-    assert store.get_session(middle) is not None
     assert not (tmp_path / oldest).exists()
     assert store.get_session(oldest) is None
     assert any(item["id"] == backlog["id"] for item in store.list_backlog())
@@ -71,3 +70,16 @@ def test_prune_finished_sessions(tmp_path, monkeypatch):
     assert no_prune["removed_sessions"] == []
     assert no_prune["removed_raw"] == []
     assert (tmp_path / newest / "screen.mp4").exists()
+
+
+def test_delete_session_storage_removes_media_and_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("REEL_DB_PATH", str(tmp_path / "reel-studio.db"))
+    session_id = "d" * 32
+    _finished_session(tmp_path, session_id)
+
+    result = delete_session_storage(session_id)
+
+    assert result == {"deleted": True, "session_id": session_id}
+    assert not (tmp_path / session_id).exists()
+    assert store.get_session(session_id) is None

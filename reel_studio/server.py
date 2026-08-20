@@ -226,6 +226,8 @@ Authentication: `Authorization: Bearer <REEL_API_TOKEN>`
 Core loop: `start_session` → `observe` → `act` with optional narration → `finish`.
 Core tools include `start_session`, `observe`, `act`, `finish`, `get_status`,
 `get_session`, and `list_sessions`.
+Finished sessions can be removed explicitly with `delete_session(session_id,
+confirm=true)`; this deletes media and metadata for only that session.
 
 Optional `start_session` branding parameters: `title`, `subtitle`, `accent`,
 `cta_url`, `cta_text`, and `music` (`none` or `subtle`).
@@ -764,10 +766,14 @@ def docs_page(base_url: str = "/") -> str:
       <code>REEL_KEEP_RAW_CLIPS</code> (default 0, keep all retained raw
       recordings).</p>
       <p><code>REEL_MAX_CLIPS</code> defaults to <code>50</code>; set it to
-      <code>0</code> to disable pruning. <code>REEL_KEEP_RAW_CLIPS</code>
-      defaults to <code>0</code>, retaining raw recordings for every retained
+      <code>0</code> to disable pruning. <code>REEL_KEEP_RAW_CLIPS</code> defaults to <code>0</code>, retaining raw recordings for every retained
       session. Removing raw recordings preserves the public video but makes
       rerender unavailable.</p>
+    </div>
+    <div class="tool card"><h3><code>delete_session(session_id, confirm)</code></h3>
+      <p>Delete one finished session, including its public MP4, raw recording,
+      screenshots, narration clips, storyboard metadata, and theater entry.
+      This requires <code>confirm=true</code> and never deletes active sessions.</p>
     </div>
     <h2>The storyboard workflow</h2>
     <p>Give the agent a product story, then let it loop: call
@@ -1306,6 +1312,18 @@ async def prune(
     return await asyncio.to_thread(
         retention.prune_storage, max_clips, keep_raw_clips
     )
+
+
+@mcp.tool()
+async def delete_session(session_id: str, confirm: bool = False) -> dict:
+    """Delete one finished session after explicit confirmation."""
+    if not confirm:
+        return {
+            "deleted": False,
+            "session_id": session_id,
+            "reason": "confirmation_required",
+        }
+    return await asyncio.to_thread(retention.delete_session_storage, session_id.strip())
 
 
 @mcp.custom_route(

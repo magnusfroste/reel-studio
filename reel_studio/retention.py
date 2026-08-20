@@ -45,6 +45,23 @@ def _safe_session_directory(
     return target
 
 
+def delete_session_storage(session_id: str) -> dict[str, Any]:
+    """Delete one finished session's media and metadata safely."""
+    session = store.get_session(session_id)
+    if session is None:
+        return {"deleted": False, "session_id": session_id, "reason": "not_found"}
+    if session.get("status") != "finished":
+        raise ValueError("only finished sessions can be deleted")
+    root = output_root().resolve()
+    target = _safe_session_directory(
+        session_id, _session_directory(session, root), root
+    )
+    if target.exists():
+        shutil.rmtree(target)
+    store.delete_session(session_id)
+    return {"deleted": True, "session_id": session_id}
+
+
 def prune_storage(max_clips: int, keep_raw_clips: int) -> dict[str, Any]:
     """Prune old finished sessions without touching shared storage."""
     max_clips = normalize_limit(max_clips, DEFAULT_MAX_CLIPS)
