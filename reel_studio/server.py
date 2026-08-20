@@ -232,6 +232,8 @@ confirm=true)`; this deletes media and metadata for only that session.
 Optional `start_session` branding parameters: `title`, `subtitle`, `accent`,
 `cta_url`, `cta_text`, and `music` (`none` or `subtle`).
 Target text reliably with `scroll_to_text` and non-recording `assert_visible`.
+Use `click_and_wait` (or `click` with `wait_for_url`, `wait_for_text`, and
+`settle_ms`) so narration starts after the destination page is visibly ready.
 The director can declare and verify shot intent with `begin_shot` and `verify_shot`.
 Observed refs are semantic (for example `button:new-contact`) rather than
 position-only indexes. Use `select_option` for native/custom dropdowns and
@@ -700,13 +702,20 @@ def docs_page(base_url: str = "/") -> str:
       current image when possible. Re-observe when <code>refs_stale</code> is true.</p>
       <p><strong>Actions:</strong>
       <code>goto{{url}}</code>, <code>click{{ref}}</code>,
+      <code>click_and_wait{{ref,target_text?,wait_for_url?,wait_for_text?,settle_ms?}}</code>,
       <code>type{{ref,text}}</code>, <code>select_option{{ref,text}}</code>,
       <code>press_key{{ref,text}}</code>, <code>set_zoom{{text}}</code>,
       <code>annotate{{ref,text,style,ms,dim}}</code>,
       <code>scroll{{dy}}</code>,
       <code>scroll_to_text{{text}}</code>,
       <code>hover{{ref}}</code>, <code>highlight{{ref}}</code>, and
-      <code>wait{{ms}}</code>. Refs come from <code>observe</code>.</p></div>
+      <code>wait{{ms}}</code>. Refs come from <code>observe</code>. Narration
+      defaults to <code>after_settle</code>; use <code>before_action</code> only
+      for deliberate pre-action narration. An annotation follows its target
+      through scroll, resize, and layout changes and remains visible for the
+      longer of its own duration and the narration duration. Use
+      <code>target_text</code> when a parent navigation label and its child
+      module have similar names.</p></div>
     <div class="tool card"><h3><code>assert_visible(session_id, text)</code></h3>
       <p>Check whether visible text is present without recording a storyboard
       step or changing the rendered video.</p>

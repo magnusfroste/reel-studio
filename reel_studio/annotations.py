@@ -41,7 +41,6 @@ def annotation_script() -> str:
   if (old) old.remove();
   const group = document.createElement("div");
   group.dataset.annotationId = spec.id;
-  const {x, y, width, height} = spec.box;
   const accent = spec.accent || "#ffd166";
   if (spec.dim) {
     const dim = document.createElement("div");
@@ -49,21 +48,21 @@ def annotation_script() -> str:
     Object.assign(dim.style, {position:"fixed", inset:"0", background:"rgba(5,10,20,.34)"});
     group.appendChild(dim);
   }
+  let label = null;
   const box = document.createElement("div");
   box.dataset.annotationBox = "true";
   Object.assign(box.style, {
-    position:"fixed", left:`${x-10}px`, top:`${y-10}px`,
-    width:`${width+20}px`, height:`${height+20}px`,
+    position:"fixed",
     border:`3px solid ${accent}`, borderRadius:"12px",
     boxShadow:`0 0 0 5px color-mix(in srgb, ${accent} 30%, transparent), 0 0 28px color-mix(in srgb, ${accent} 75%, transparent)`,
     background:"transparent", transition:"all 180ms ease"
   });
   group.appendChild(box);
   if (spec.kind !== "underline") {
-    const label = document.createElement("div");
+    label = document.createElement("div");
     label.textContent = spec.label;
     Object.assign(label.style, {
-      position:"fixed", left:`${Math.max(8, x)}px`, top:`${Math.max(8, y-48)}px`,
+      position:"fixed",
       maxWidth:"360px", padding:"8px 12px", borderRadius:"8px",
       background:"#101827", color:"#fff", border:`1px solid ${accent}`,
       fontSize:"16px", fontWeight:"700", lineHeight:"1.2",
@@ -72,8 +71,43 @@ def annotation_script() -> str:
     group.appendChild(label);
   }
   root.appendChild(group);
+  const target = spec.selector ? document.querySelector(spec.selector) : null;
+  const update = () => {
+    const rect = target?.getBoundingClientRect?.() || spec.box;
+    if (!rect) return;
+    const {x, y, width, height} = rect;
+    Object.assign(box.style, {
+      left:`${x-10}px`, top:`${y-10}px`,
+      width:`${width+20}px`, height:`${height+20}px`,
+    });
+    if (label) Object.assign(label.style, {
+      left:`${Math.max(8, x)}px`, top:`${Math.max(8, y-48)}px`,
+    });
+  };
+  update();
+  if (target && spec.follow_target !== false) {
+    const observer = new ResizeObserver(update);
+    observer.observe(target);
+    const onScroll = () => update();
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    setTimeout(() => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+    }, spec.duration_ms + 100);
+  }
+  setTimeout(() => {
+    group.remove();
+    target?.removeAttribute?.("data-video-director-annotation-target");
+  }, spec.duration_ms);
 }
 """
+
+
+def annotation_hold_seconds(narration_duration: float, annotation_duration: float) -> float:
+    """Return the visual hold needed to keep an annotation visible."""
+    return max(0.0, narration_duration, annotation_duration)
 
 
 def annotation_id(ref: str, counter: int) -> str:

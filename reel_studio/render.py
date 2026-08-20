@@ -256,14 +256,16 @@ def _mux_segment_audio(
         command.extend([
             "-f", "lavfi", "-i",
             (
-                "aevalsrc=0.45*sin(2*PI*220*t)+"
-                "0.2*sin(2*PI*277*t):s=48000:"
-                f"d={duration:.3f}"
+                "anoisesrc=color=pink:amplitude=0.015:"
+                f"sample_rate=48000:d={duration:.3f}"
             ),
         ])
         input_count += 1
         music_index = input_count
-        filters.append(f"[{music_index}:a]volume=0.09[bed]")
+        filters.append(
+            f"[{music_index}:a]highpass=f=120,lowpass=f=1800,"
+            "volume=0.4[bed]"
+        )
     labels = "".join(f"[a{i}]" for i in range(1, len(clips) + 1))
     if labels:
         if music == "subtle":

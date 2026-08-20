@@ -142,9 +142,14 @@ and active sessions cannot be deleted.
 `observe` and `act` return structured feedback plus a viewable screenshot.
 `observe` also includes truncated visible `page_text` so agents can verify
 plain page content such as table rows without reading the image.
-`act` accepts `goto`, `click`, `type`, `select_option`, `press_key`, `set_zoom`, `scroll`, `hover`, `highlight`,
+`act` accepts `goto`, `click`, `click_and_wait`, `type`, `select_option`, `press_key`, `set_zoom`, `scroll`, `hover`, `highlight`,
 `scroll_to_text`, and `wait` actions. `select_option` supports native selects
 and ARIA comboboxes; `press_key` sends a keyboard key to the observed control.
+`click_and_wait` (or `click` with `wait_for_url`/`wait_for_text`) waits for the
+destination state before starting narration; `settle_ms` adds a final layout
+stability pause. Use `target_text` to disambiguate a child module from a parent
+sidebar section. `annotate` follows its target through scroll, resize, and
+layout changes and holds for the longer of annotation and narration duration.
 `set_zoom` changes the page zoom between `0.5` and `2.0` for director-led
 establishing, focus, and return-to-context shots.
 `annotate` adds a persistent in-video callout, marker, or underline to an

@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import time
 import uuid
+from typing import cast
 
 from playwright.async_api import (
     Browser,
@@ -27,7 +28,12 @@ from .render import (
     start_recording,
     stop_recording,
 )
-from .annotations import annotation_id, annotation_script, validate_annotation
+from .annotations import (
+    annotation_hold_seconds,
+    annotation_id,
+    annotation_script,
+    validate_annotation,
+)
 from .refs import semantic_ref
 from .schema import Action
 from .tts import synthesize
@@ -161,13 +167,18 @@ class BrowserSession:
                     const selector = `${tag}[${attribute}=${JSON.stringify(value)}]`;
                     if (document.querySelectorAll(selector).length === 1) return selector;
                 }
+                const href = el.getAttribute('href');
+                if (tag === 'a' && href) {
+                    const selector = `a[href=${JSON.stringify(href)}]`;
+                    if (document.querySelectorAll(selector).length === 1) return selector;
+                }
                 const text = (el.innerText || '').trim().split(/\\n+/)[0].replace(/\\s+/g, ' ');
                 if (text && ['a', 'button', 'label', '[role=button]'].some((role) =>
                     role === tag || role === '[role=button]' && el.getAttribute('role') === 'button'
                 )) {
-                    const shortText = text.slice(0, 120).replace(/"/g, '\\"');
+                    const shortText = text.slice(0, 120);
                     const target = el.getAttribute('role') === 'button' ? '[role="button"]' : tag;
-                    return `${target}:has-text("${shortText}")`;
+                    return `${target}:has-text(${JSON.stringify(shortText)})`;
                 }
                 const parts = [];
                 while (el && el.nodeType === 1 && el !== document.body) {
@@ -251,16 +262,53 @@ class BrowserSession:
             "[data-video-director-spotlight]"
         ).evaluate_all("(nodes) => nodes.forEach((node) => node.remove())")
 
-    async def _visible_text_target(self, text: str) -> Locator | None:
+    async def _visible_text_target(self, text: str, exact: bool = False) -> Locator | None:
         text = text.strip()
         if not text:
             return None
-        matches = self.page.get_by_text(text, exact=False)
+        matches = self.page.get_by_text(text, exact=exact)
         for index in range(await matches.count()):
             candidate = matches.nth(index)
             try:
                 if await candidate.is_visible():
                     return candidate
+            except PlaywrightError:
+                continue
+        return None
+
+    async def _action_target(
+        self, action: Action, actionable: bool = False
+    ) -> Locator | None:
+        """Resolve an action ref, optionally narrowing it to exact visible text."""
+        assert action.ref is not None
+        target = self.page.locator(self.refs[action.ref]).first
+        if not action.target_text:
+            return target
+        base_handle = await target.element_handle()
+        exact = self.page.get_by_text(action.target_text.strip(), exact=True)
+        for index in range(await exact.count()):
+            candidate = exact.nth(index)
+            try:
+                candidate_handle = await candidate.element_handle()
+                in_target = (
+                    candidate_handle
+                    and base_handle
+                    and await target.evaluate(
+                        "(el, candidate) => el === candidate || el.contains(candidate)",
+                        candidate_handle,
+                    )
+                )
+                if not in_target or not await candidate.is_visible():
+                    continue
+                if actionable:
+                    control = candidate.locator(
+                        "xpath=ancestor-or-self::*[self::a or self::button "
+                        "or self::input or self::textarea or self::select "
+                        "or @role='button'][1]"
+                    ).first
+                    if await control.count():
+                        return control
+                return candidate
             except PlaywrightError:
                 continue
         return None
@@ -313,6 +361,9 @@ class BrowserSession:
         action_in_viewport: bool | None = None
         live_annotation_id: str | None = None
         annotation_duration = 0.0
+        settled_by: dict[str, str] = {}
+        action_finished_at: float | None = None
+        action_completed_at: float | None = None
         before_url = self.page.url
         if action.ref and self.refs_stale:
             return await self.error_result(
@@ -370,7 +421,12 @@ class BrowserSession:
                 normalized = validate_annotation(
                     action.style, action.text or "", action.ms or 2500
                 )
-                target = self.page.locator(self.refs[action.ref]).first
+                target = await self._action_target(action)
+                if target is None:
+                    return await self.error_result(
+                        "target_text_not_found",
+                        f"Exact visible target text not found: {action.target_text}",
+                    )
                 await target.wait_for(state="visible", timeout=5000)
                 await target.scroll_into_view_if_needed(timeout=5000)
                 box = await target.bounding_box()
@@ -380,19 +436,31 @@ class BrowserSession:
                     )
                 self.annotation_counter += 1
                 live_annotation_id = annotation_id(action.ref, self.annotation_counter)
-                annotation_duration = float(normalized["duration_ms"]) / 1000
+                annotation_duration = cast(float, normalized["duration_ms"]) / 1000
+                visual_duration_ms = max(
+                    cast(int, normalized["duration_ms"]), int(round(duration * 1000))
+                )
+                await target.evaluate(
+                    "(el, id) => el.setAttribute('data-video-director-annotation-target', id)",
+                    live_annotation_id,
+                )
                 await self.page.evaluate(
                     annotation_script(),
                     {
                         "id": live_annotation_id,
                         "kind": normalized["kind"],
                         "label": normalized["label"],
-                        "duration_ms": normalized["duration_ms"],
+                        "duration_ms": visual_duration_ms,
                         "dim": action.dim,
                         "box": box,
+                        "selector": (
+                            f"[data-video-director-annotation-target="
+                            f"{live_annotation_id!r}]"
+                        ),
+                        "follow_target": True,
                     },
                 )
-            elif action_type in {"click", "type", "select_option", "press_key", "hover", "highlight"}:
+            elif action_type in {"click", "click_and_wait", "type", "select_option", "press_key", "hover", "highlight"}:
                 if not action.ref or action.ref not in self.refs:
                     return await self.error_result(
                         "unknown_ref", f"Unknown element ref: {action.ref}"
@@ -403,9 +471,16 @@ class BrowserSession:
                         "unknown_ref", f"Element ref no longer matches: {action.ref}"
                     )
                 target = target.first
+                if action.target_text:
+                    target = await self._action_target(action, actionable=True)
+                    if target is None:
+                        return await self.error_result(
+                            "target_text_not_found",
+                            f"Exact visible target text not found: {action.target_text}",
+                        )
                 await target.wait_for(state="visible", timeout=5000)
                 await target.scroll_into_view_if_needed(timeout=5000)
-                if action_type == "click":
+                if action_type in {"click", "click_and_wait"}:
                     await self._inject_spotlight(target)
                     await target.click()
                     await self.page.wait_for_timeout(500)
@@ -453,13 +528,38 @@ class BrowserSession:
                 await self.page.mouse.wheel(0, action.dy)
             elif action_type == "wait":
                 await self.page.wait_for_timeout(action.ms)
+            action_finished_at = time.monotonic() - self.t0
             if self.page.url != before_url:
                 self.refs_stale = True
             try:
                 await self.page.wait_for_load_state("domcontentloaded", timeout=2000)
             except PlaywrightTimeoutError:
                 pass
-            await self.page.wait_for_timeout(250)
+            if action.wait_for_url:
+                try:
+                    await self.page.wait_for_url(
+                        f"**{action.wait_for_url}**", timeout=8000
+                    )
+                    settled_by["url_contains"] = action.wait_for_url
+                except PlaywrightTimeoutError as exc:
+                    return await self.error_result(
+                        "page_not_settled",
+                        f"URL did not contain {action.wait_for_url!r}: {exc}",
+                    )
+            if action.wait_for_text:
+                deadline = time.monotonic() + 8.0
+                while time.monotonic() < deadline:
+                    if await self._visible_text_target(action.wait_for_text, exact=True):
+                        settled_by["visible_text"] = action.wait_for_text
+                        break
+                    await self.page.wait_for_timeout(100)
+                else:
+                    return await self.error_result(
+                        "page_not_settled",
+                        f"Visible text did not appear: {action.wait_for_text}",
+                    )
+            await self.page.wait_for_timeout(action.settle_ms)
+            action_completed_at = time.monotonic() - self.t0
         except PlaywrightTimeoutError as exc:
             if self.page.url != before_url:
                 self.refs_stale = True
@@ -472,18 +572,21 @@ class BrowserSession:
             if self.page.url != before_url:
                 self.refs_stale = True
             return await self.error_result("action_failed", str(exc))
+        if action.narration_timing == "after_action" and action_finished_at is not None:
+            offset = action_finished_at
+        elif action.narration_timing == "after_settle" and action_completed_at is not None:
+            # TTS is prepared before the browser action; align narration with
+            # the settled visual state rather than with synthesis start.
+            offset = action_completed_at
+        hold_duration = annotation_hold_seconds(duration, annotation_duration)
         if clip:
-            if action_type == "annotate":
-                # TTS is prepared before the browser action; align annotation
-                # narration to the moment the target is actually visible.
-                offset = time.monotonic() - self.t0
             self.narrations.append((offset, clip, narration))
-        self.timeline.append((offset, clip, duration))
-        if clip:
+        self.timeline.append((offset, clip, hold_duration))
+        if hold_duration:
             elapsed = time.monotonic() - (self.t0 + offset)
-            padding_applied = elapsed < duration
-            if elapsed < duration:
-                await asyncio.sleep(duration - elapsed)
+            padding_applied = elapsed < hold_duration
+            if elapsed < hold_duration:
+                await asyncio.sleep(hold_duration - elapsed)
         else:
             padding_applied = False
         if live_annotation_id:
@@ -499,10 +602,15 @@ class BrowserSession:
             "title": await self.page.title(),
             "changed": self.page.url != before_url,
             "narration_duration": round(duration, 3),
+            "visual_hold_duration": round(hold_duration, 3),
             "padding_applied": padding_applied,
             "refs_stale": self.refs_stale,
             "screenshot_path": str(screenshot),
         }
+        if settled_by:
+            result["settled_by"] = settled_by
+        if action_completed_at is not None:
+            result["settled_at_seconds"] = round(action_completed_at, 3)
         if action_type == "scroll_to_text":
             result.update({"box": action_box, "in_viewport": action_in_viewport})
         if live_annotation_id:
