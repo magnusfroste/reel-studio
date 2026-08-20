@@ -153,6 +153,9 @@ visual noise while the narration explains the target.
 The director can declare and verify shots with `begin_shot` and `verify_shot`.
 Shots record framing (`wide`, `medium`, `close`), zoom, focus target, teaching
 intent, and whether the visual result matched the narration.
+When shots exist, `finish` acts as a quality gate and refuses to publish until
+every shot is explicitly verified. If a live focus text is missing,
+`verify_shot` records `needs_review` automatically.
 `scroll_to_text` finds visible text,
 scrolls it into view, and returns its bounding box. Use `assert_visible` to
 check text without adding a storyboard step or changing the recording.

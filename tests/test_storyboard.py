@@ -1,4 +1,5 @@
 from reel_studio import store
+from reel_studio.server import pending_shots
 
 
 def test_storyboard_shot_round_trip(tmp_path, monkeypatch):
@@ -23,3 +24,13 @@ def test_storyboard_shot_round_trip(tmp_path, monkeypatch):
     assert verified["status"] == "verified"
     assert verified["verification_note"] == "Target visible and readable"
     assert store.get_session(session_id)["shots"][0]["shot_id"] == "lead-focus"
+    assert pending_shots(store.get_session(session_id)) == []
+
+
+def test_pending_shots_identifies_unverified_work(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("REEL_DB_PATH", str(tmp_path / "story.db"))
+    session_id = "e" * 32
+    store.create_session(session_id, "https://example.com", "voice", 1280, 720, str(tmp_path / session_id))
+    store.begin_shot(session_id, "opening", "Establish context", "wide")
+    assert [shot["shot_id"] for shot in pending_shots(store.get_session(session_id))] == ["opening"]

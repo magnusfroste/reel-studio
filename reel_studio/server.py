@@ -730,6 +730,9 @@ def docs_page(base_url: str = "/") -> str:
     <div class="tool card"><h3><code>verify_shot(session_id, shot_id, verified, verification_note?)</code></h3>
       <p>Record whether the intended focus was visible, readable, and aligned
       with the narration. Failed shots become <code>needs_review</code>.</p></div>
+    <p class="muted">If a session has storyboard shots, <code>finish</code> refuses
+    to publish while any shot is still <code>planned</code> or
+    <code>needs_review</code>.</p>
     <div class="tool card"><h3><code>update_step_narration(session_id, index, narration, voice?)</code></h3>
       <p>Replace the narration text (and optionally the voice) for one step
       in a finished session. The recorded browser video is not changed.</p>
@@ -1110,10 +1113,28 @@ async def verify_shot(
 ) -> dict:
     """Record whether a storyboard shot met its teaching criterion."""
     try:
-        shot = store.verify_shot(session_id, shot_id.strip(), verified, verification_note)
+        stored = store.get_shot(session_id, shot_id.strip())
+        if stored is None:
+            raise ValueError(f"unknown shot: {shot_id}")
+        note = verification_note.strip()
+        if verified and stored.get("focus_text"):
+            live = sessions.get(session_id)
+            if live is not None:
+                visible = await live.assert_visible(stored["focus_text"])
+                if not visible.get("visible"):
+                    verified = False
+                    note = note or f"Focus text not visible: {stored['focus_text']}"
+        shot = store.verify_shot(session_id, shot_id.strip(), verified, note)
     except ValueError as exc:
         return {"ok": False, "error": {"type": "shot_not_found", "message": str(exc)}}
     return {"ok": True, "shot": shot}
+
+
+def pending_shots(session: dict | None) -> list[dict]:
+    """Return storyboard shots that are not explicitly verified."""
+    if not session:
+        return []
+    return [shot for shot in session.get("shots", []) if shot.get("status") != "verified"]
 
 
 def _editable_session(session_id: str) -> tuple[dict | None, dict | None]:
@@ -1320,6 +1341,17 @@ async def finish(session_id: str) -> dict:
             "error": {
                 "type": "unknown_session",
                 "message": f"Unknown session_id: {session_id}",
+            },
+        }
+    stored = store.get_session(session_id)
+    pending = pending_shots(stored)
+    if pending:
+        return {
+            "ok": False,
+            "error": {
+                "type": "shot_review_required",
+                "message": "Verify all storyboard shots before publishing.",
+                "pending_shots": [shot["shot_id"] for shot in pending],
             },
         }
     try:
