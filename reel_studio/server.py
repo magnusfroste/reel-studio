@@ -230,6 +230,9 @@ Core tools include `start_session`, `observe`, `act`, `finish`, `get_status`,
 Optional `start_session` branding parameters: `title`, `subtitle`, `accent`,
 `cta_url`, `cta_text`, and `music` (`none` or `subtle`).
 Target text reliably with `scroll_to_text` and non-recording `assert_visible`.
+Observed refs are semantic (for example `button:new-contact`) rather than
+position-only indexes. Use `select_option` for native/custom dropdowns and
+`press_key` for keyboard-driven controls.
 Edit finished narration with `update_step_narration`, then use `rerender`.
 Storage retention uses `REEL_MAX_CLIPS` and `REEL_KEEP_RAW_CLIPS`; call the
 token-protected `prune` tool to clean old finished sessions manually.
@@ -694,7 +697,8 @@ def docs_page(base_url: str = "/") -> str:
       current image when possible. Re-observe when <code>refs_stale</code> is true.</p>
       <p><strong>Actions:</strong>
       <code>goto{{url}}</code>, <code>click{{ref}}</code>,
-      <code>type{{ref,text}}</code>, <code>scroll{{dy}}</code>,
+      <code>type{{ref,text}}</code>, <code>select_option{{ref,text}}</code>,
+      <code>press_key{{ref,text}}</code>, <code>scroll{{dy}}</code>,
       <code>scroll_to_text{{text}}</code>,
       <code>hover{{ref}}</code>, <code>highlight{{ref}}</code>, and
       <code>wait{{ms}}</code>. Refs come from <code>observe</code>.</p></div>

@@ -27,6 +27,7 @@ from .render import (
     start_recording,
     stop_recording,
 )
+from .refs import semantic_ref
 from .schema import Action
 from .tts import synthesize
 
@@ -163,14 +164,13 @@ class BrowserSession:
         self.refs.clear()
         page_text = (await self.page.locator("body").inner_text())[:4000]
         elements = []
+        used_refs: set[str] = set()
         locator = self.page.locator("a,button,input,textarea,select,[role=button],[onclick]")
         count = await locator.count()
         for index in range(count):
             item = locator.nth(index)
             if not await item.is_visible():
                 continue
-            ref = f"e{index}"
-            self.refs[ref] = await self._stable_selector(item)
             box = await item.bounding_box()
             role = await item.get_attribute("role") or (await item.evaluate(
                 "(el) => el.tagName.toLowerCase()"
@@ -178,6 +178,8 @@ class BrowserSession:
             text = (await item.inner_text()).strip() if role not in {"input", "textarea", "select"} else ""
             if not text:
                 text = await item.get_attribute("aria-label") or await item.get_attribute("placeholder") or ""
+            ref = semantic_ref(role, text, index, used_refs)
+            self.refs[ref] = await self._stable_selector(item)
             elements.append({"ref": ref, "role": role, "text": text, "box": box})
         self.refs_stale = False
         return {
@@ -318,7 +320,7 @@ class BrowserSession:
                 await target.scroll_into_view_if_needed(timeout=5000)
                 action_box = await target.bounding_box()
                 action_in_viewport = await self._box_in_viewport(action_box)
-            elif action_type in {"click", "type", "hover", "highlight"}:
+            elif action_type in {"click", "type", "select_option", "press_key", "hover", "highlight"}:
                 if not action.ref or action.ref not in self.refs:
                     return await self.error_result(
                         "unknown_ref", f"Unknown element ref: {action.ref}"
@@ -338,6 +340,28 @@ class BrowserSession:
                     await self._clear_spotlights()
                 elif action_type == "type":
                     await target.fill(action.text or "")
+                elif action_type == "select_option":
+                    option_text = (action.text or "").strip()
+                    if not option_text:
+                        return await self.error_result(
+                            "invalid_action", "select_option requires text"
+                        )
+                    tag_name = await target.evaluate("(el) => el.tagName.toLowerCase()")
+                    if tag_name == "select":
+                        await target.select_option(label=option_text)
+                    else:
+                        await target.click()
+                        option = self.page.get_by_role(
+                            "option", name=option_text, exact=False
+                        ).first
+                        await option.click(timeout=5000)
+                elif action_type == "press_key":
+                    key = (action.text or "").strip()
+                    if not key:
+                        return await self.error_result(
+                            "invalid_action", "press_key requires text"
+                        )
+                    await target.press(key)
                 elif action_type == "hover":
                     await target.hover()
                 else:
