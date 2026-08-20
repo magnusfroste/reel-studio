@@ -27,6 +27,7 @@ from .render import (
     start_recording,
     stop_recording,
 )
+from .annotations import annotation_id, annotation_script, validate_annotation
 from .refs import semantic_ref
 from .schema import Action
 from .tts import synthesize
@@ -70,6 +71,7 @@ class BrowserSession:
     timeline: list[tuple[float, Path | None, float]] = field(default_factory=list)
     refs_stale: bool = True
     runtime_closed: bool = False
+    annotation_counter: int = 0
 
     @classmethod
     async def create(
@@ -286,6 +288,8 @@ class BrowserSession:
         duration = 0.0
         action_box: dict | None = None
         action_in_viewport: bool | None = None
+        live_annotation_id: str | None = None
+        annotation_duration = 0.0
         before_url = self.page.url
         if action.ref and self.refs_stale:
             return await self.error_result(
@@ -334,6 +338,36 @@ class BrowserSession:
                 await self.page.evaluate(
                     "(level) => { document.documentElement.style.zoom = String(level); }",
                     level,
+                )
+            elif action_type == "annotate":
+                if not action.ref or action.ref not in self.refs:
+                    return await self.error_result(
+                        "unknown_ref", f"Unknown element ref: {action.ref}"
+                    )
+                normalized = validate_annotation(
+                    action.style, action.text or "", action.ms or 2500
+                )
+                target = self.page.locator(self.refs[action.ref]).first
+                await target.wait_for(state="visible", timeout=5000)
+                await target.scroll_into_view_if_needed(timeout=5000)
+                box = await target.bounding_box()
+                if not box:
+                    return await self.error_result(
+                        "focus_target_not_visible", f"Target has no viewport box: {action.ref}"
+                    )
+                self.annotation_counter += 1
+                live_annotation_id = annotation_id(action.ref, self.annotation_counter)
+                annotation_duration = float(normalized["duration_ms"]) / 1000
+                await self.page.evaluate(
+                    annotation_script(),
+                    {
+                        "id": live_annotation_id,
+                        "kind": normalized["kind"],
+                        "label": normalized["label"],
+                        "duration_ms": normalized["duration_ms"],
+                        "dim": action.dim,
+                        "box": box,
+                    },
                 )
             elif action_type in {"click", "type", "select_option", "press_key", "hover", "highlight"}:
                 if not action.ref or action.ref not in self.refs:
@@ -416,6 +450,10 @@ class BrowserSession:
                 self.refs_stale = True
             return await self.error_result("action_failed", str(exc))
         if clip:
+            if action_type == "annotate":
+                # TTS is prepared before the browser action; align annotation
+                # narration to the moment the target is actually visible.
+                offset = time.monotonic() - self.t0
             self.narrations.append((offset, clip, narration))
         self.timeline.append((offset, clip, duration))
         if clip:
@@ -425,6 +463,11 @@ class BrowserSession:
                 await asyncio.sleep(duration - elapsed)
         else:
             padding_applied = False
+        if live_annotation_id:
+            await self.page.evaluate(
+                "(id) => document.querySelector(`[data-annotation-id=\"${id}\"]`)?.remove()",
+                live_annotation_id,
+            )
         screenshot = await self.capture_screenshot()
         result = {
             "ok": True,
@@ -439,6 +482,9 @@ class BrowserSession:
         }
         if action_type == "scroll_to_text":
             result.update({"box": action_box, "in_viewport": action_in_viewport})
+        if live_annotation_id:
+            result["annotation_id"] = live_annotation_id
+            result["annotation_duration"] = round(annotation_duration, 3)
         return result, screenshot
 
     def status(self) -> dict:

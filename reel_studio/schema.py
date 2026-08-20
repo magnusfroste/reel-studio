@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 class Action(BaseModel):
     type: Literal[
-        "goto", "click", "type", "select_option", "press_key", "set_zoom", "scroll", "scroll_to_text",
+        "goto", "click", "type", "select_option", "press_key", "set_zoom", "annotate", "scroll", "scroll_to_text",
         "hover", "highlight", "wait",
     ]
     url: str | None = None
@@ -14,3 +14,5 @@ class Action(BaseModel):
     dy: int = 0
     ms: int = Field(default=0, ge=0)
     spotlight: bool = True
+    style: Literal["marker", "callout", "underline"] = "callout"
+    dim: bool = False

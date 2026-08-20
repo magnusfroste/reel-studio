@@ -701,6 +701,7 @@ def docs_page(base_url: str = "/") -> str:
       <code>goto{{url}}</code>, <code>click{{ref}}</code>,
       <code>type{{ref,text}}</code>, <code>select_option{{ref,text}}</code>,
       <code>press_key{{ref,text}}</code>, <code>set_zoom{{text}}</code>,
+      <code>annotate{{ref,text,style,ms,dim}}</code>,
       <code>scroll{{dy}}</code>,
       <code>scroll_to_text{{text}}</code>,
       <code>hover{{ref}}</code>, <code>highlight{{ref}}</code>, and
