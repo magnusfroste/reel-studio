@@ -21,3 +21,9 @@ def test_press_key_action_accepts_key():
     action = Action(type="press_key", ref="product-selector", text="Escape")
     assert action.type == "press_key"
     assert action.text == "Escape"
+
+
+def test_set_zoom_action_accepts_level():
+    action = Action(type="set_zoom", text="1.15")
+    assert action.type == "set_zoom"
+    assert action.text == "1.15"

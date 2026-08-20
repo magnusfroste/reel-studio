@@ -700,7 +700,8 @@ def docs_page(base_url: str = "/") -> str:
       <p><strong>Actions:</strong>
       <code>goto{{url}}</code>, <code>click{{ref}}</code>,
       <code>type{{ref,text}}</code>, <code>select_option{{ref,text}}</code>,
-      <code>press_key{{ref,text}}</code>, <code>scroll{{dy}}</code>,
+      <code>press_key{{ref,text}}</code>, <code>set_zoom{{text}}</code>,
+      <code>scroll{{dy}}</code>,
       <code>scroll_to_text{{text}}</code>,
       <code>hover{{ref}}</code>, <code>highlight{{ref}}</code>, and
       <code>wait{{ms}}</code>. Refs come from <code>observe</code>.</p></div>

@@ -142,9 +142,11 @@ and active sessions cannot be deleted.
 `observe` and `act` return structured feedback plus a viewable screenshot.
 `observe` also includes truncated visible `page_text` so agents can verify
 plain page content such as table rows without reading the image.
-`act` accepts `goto`, `click`, `type`, `select_option`, `press_key`, `scroll`, `hover`, `highlight`,
+`act` accepts `goto`, `click`, `type`, `select_option`, `press_key`, `set_zoom`, `scroll`, `hover`, `highlight`,
 `scroll_to_text`, and `wait` actions. `select_option` supports native selects
 and ARIA comboboxes; `press_key` sends a keyboard key to the observed control.
+`set_zoom` changes the page zoom between `0.5` and `2.0` for director-led
+establishing, focus, and return-to-context shots.
 `scroll_to_text` finds visible text,
 scrolls it into view, and returns its bounding box. Use `assert_visible` to
 check text without adding a storyboard step or changing the recording.

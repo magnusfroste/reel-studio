@@ -320,6 +320,21 @@ class BrowserSession:
                 await target.scroll_into_view_if_needed(timeout=5000)
                 action_box = await target.bounding_box()
                 action_in_viewport = await self._box_in_viewport(action_box)
+            elif action_type == "set_zoom":
+                try:
+                    level = float((action.text or "").strip())
+                except ValueError:
+                    return await self.error_result(
+                        "invalid_action", "set_zoom requires a numeric level"
+                    )
+                if not 0.5 <= level <= 2.0:
+                    return await self.error_result(
+                        "invalid_action", "set_zoom level must be between 0.5 and 2.0"
+                    )
+                await self.page.evaluate(
+                    "(level) => { document.documentElement.style.zoom = String(level); }",
+                    level,
+                )
             elif action_type in {"click", "type", "select_option", "press_key", "hover", "highlight"}:
                 if not action.ref or action.ref not in self.refs:
                     return await self.error_result(
