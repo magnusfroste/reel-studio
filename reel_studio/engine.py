@@ -161,12 +161,13 @@ class BrowserSession:
                     const selector = `${tag}[${attribute}=${JSON.stringify(value)}]`;
                     if (document.querySelectorAll(selector).length === 1) return selector;
                 }
-                const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+                const text = (el.innerText || '').trim().split(/\\n+/)[0].replace(/\\s+/g, ' ');
                 if (text && ['a', 'button', 'label', '[role=button]'].some((role) =>
                     role === tag || role === '[role=button]' && el.getAttribute('role') === 'button'
                 )) {
                     const shortText = text.slice(0, 120).replace(/"/g, '\\"');
-                    return `${tag}:has-text("${shortText}")`;
+                    const target = el.getAttribute('role') === 'button' ? '[role="button"]' : tag;
+                    return `${target}:has-text("${shortText}")`;
                 }
                 const parts = [];
                 while (el && el.nodeType === 1 && el !== document.body) {
