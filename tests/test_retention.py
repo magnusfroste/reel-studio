@@ -83,3 +83,17 @@ def test_delete_session_storage_removes_media_and_metadata(tmp_path, monkeypatch
     assert result == {"deleted": True, "session_id": session_id}
     assert not (tmp_path / session_id).exists()
     assert store.get_session(session_id) is None
+
+
+def test_delete_session_storage_removes_shots(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("REEL_DB_PATH", str(tmp_path / "reel-studio.db"))
+    session_id = "e" * 32
+    _finished_session(tmp_path, session_id)
+    store.begin_shot(session_id, "shot-1", "Show the dashboard", "wide")
+
+    result = delete_session_storage(session_id)
+
+    assert result == {"deleted": True, "session_id": session_id}
+    assert not (tmp_path / session_id).exists()
+    assert store.get_session(session_id) is None

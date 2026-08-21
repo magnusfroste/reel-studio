@@ -349,6 +349,7 @@ def delete_session(session_id: str) -> None:
     init_schema()
     with _lock, _connect() as connection:
         connection.execute("DELETE FROM steps WHERE session_id = ?", (session_id,))
+        connection.execute("DELETE FROM shots WHERE session_id = ?", (session_id,))
         connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
 
