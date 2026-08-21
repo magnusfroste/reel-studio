@@ -3,6 +3,7 @@ from reel_studio.server import (
     build_sitemap,
     clean_display_title,
     page_shell,
+    sanitize_public_url,
     watch_page,
 )
 
@@ -39,6 +40,22 @@ def test_clean_display_title_sanitizes_urls_and_tokens():
     assert clean_display_title("https://saas.io/deals-pipeline") == "Deals Pipeline"
     assert clean_display_title("My App https://example.com/token=xyz") == "My App https://example.com/token=[REDACTED]"
     assert clean_display_title("") == "Untitled Demo"
+
+
+def test_sanitize_public_url_strips_query_and_fragment():
+    assert (
+        sanitize_public_url(
+            "https://app.example.com/admin#access_token=eyJhbGciOi123&refresh_token=abc"
+        )
+        == "https://app.example.com/admin"
+    )
+    assert (
+        sanitize_public_url("https://app.example.com/login?next=/admin&token=xyz")
+        == "https://app.example.com/login"
+    )
+    assert sanitize_public_url("not-a-url") == ""
+    assert sanitize_public_url("") == ""
+    assert sanitize_public_url(None) == ""
 
 
 def test_watch_page_renders_theater_and_steps(tmp_path, monkeypatch):

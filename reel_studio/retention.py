@@ -45,12 +45,17 @@ def _safe_session_directory(
     return target
 
 
-def delete_session_storage(session_id: str) -> dict[str, Any]:
-    """Delete one finished session's media and metadata safely."""
+def delete_session_storage(session_id: str, force: bool = False) -> dict[str, Any]:
+    """Delete one session's media and metadata safely.
+
+    Finished sessions are always deletable. With ``force=True`` a stale
+    active session (for example one orphaned by a restart) can be removed
+    too; the caller is responsible for tearing down any live runtime first.
+    """
     session = store.get_session(session_id)
     if session is None:
         return {"deleted": False, "session_id": session_id, "reason": "not_found"}
-    if session.get("status") != "finished":
+    if session.get("status") != "finished" and not force:
         raise ValueError("only finished sessions can be deleted")
     root = output_root().resolve()
     target = _safe_session_directory(

@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 from reel_studio import store
 from reel_studio.retention import delete_session_storage, prune_storage
 
@@ -93,6 +95,31 @@ def test_delete_session_storage_removes_shots(tmp_path, monkeypatch):
     store.begin_shot(session_id, "shot-1", "Show the dashboard", "wide")
 
     result = delete_session_storage(session_id)
+
+    assert result == {"deleted": True, "session_id": session_id}
+    assert not (tmp_path / session_id).exists()
+    assert store.get_session(session_id) is None
+
+
+def test_delete_session_storage_force_removes_stale_active(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("REEL_DB_PATH", str(tmp_path / "reel-studio.db"))
+    session_id = "f" * 32
+    directory = tmp_path / session_id
+    directory.mkdir()
+    store.create_session(
+        session_id,
+        "https://example.com",
+        "en-US-JennyNeural",
+        640,
+        360,
+        str(directory),
+    )
+
+    with pytest.raises(ValueError, match="only finished sessions"):
+        delete_session_storage(session_id)
+
+    result = delete_session_storage(session_id, force=True)
 
     assert result == {"deleted": True, "session_id": session_id}
     assert not (tmp_path / session_id).exists()

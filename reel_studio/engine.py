@@ -667,21 +667,32 @@ class BrowserSession:
         try:
             return await asyncio.to_thread(self._finish_media)
         finally:
-            if not self.runtime_closed:
-                try:
-                    await self.browser.close()
-                except Exception:
-                    pass
-                try:
-                    await self.playwright.stop()
-                except Exception:
-                    pass
-                try:
-                    self.xvfb.terminate()
-                except Exception:
-                    pass
-                try:
-                    self.xvfb.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.xvfb.kill()
-                self.runtime_closed = True
+            await self._close_runtime()
+
+    async def abort(self) -> None:
+        """Tear down the runtime without producing a video (force delete)."""
+        try:
+            stop_recording(self.recorder)
+        except Exception:
+            pass
+        await self._close_runtime()
+
+    async def _close_runtime(self) -> None:
+        if not self.runtime_closed:
+            try:
+                await self.browser.close()
+            except Exception:
+                pass
+            try:
+                await self.playwright.stop()
+            except Exception:
+                pass
+            try:
+                self.xvfb.terminate()
+            except Exception:
+                pass
+            try:
+                self.xvfb.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.xvfb.kill()
+            self.runtime_closed = True

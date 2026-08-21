@@ -225,10 +225,13 @@ Endpoint: {base}/mcp
 Authentication: `Authorization: Bearer <REEL_API_TOKEN>`
 
 Core loop: `start_session` → `observe` → `act` with optional narration → `finish`.
-Core tools include `start_session`, `observe`, `act`, `finish`, `get_status`,
-`get_session`, and `list_sessions`.
+Core tools include `start_session`, `observe`, `act`, `act_batch`, `finish`,
+`get_status`, `get_session`, and `list_sessions`.
+`act_batch(session_id, steps)` runs a whole beat of actions in one call; each
+step is `{{"action": ..., "narration": ...}}` and execution stops on first error.
 Finished sessions can be removed explicitly with `delete_session(session_id,
-confirm=true)`; this deletes media and metadata for only that session.
+confirm=true)`; this deletes media and metadata for only that session. Add
+`force=true` to also remove a stale active session orphaned by a restart.
 
 Optional `start_session` branding parameters: `title`, `subtitle`, `accent`,
 `cta_url`, `cta_text`, and `music` (`none` or `subtle`).
@@ -295,6 +298,25 @@ def clean_display_title(title_or_url: str | None) -> str:
     # Remove raw token strings
     cleaned = re.sub(r"\b(?:eyJ[a-zA-Z0-9_-]{10,}|[0-9a-fA-F]{32,64})\b", "[REDACTED]", cleaned)
     return cleaned.strip() or "Product Demo"
+
+
+def sanitize_public_url(url: str | None) -> str:
+    """Return a URL safe for public display: scheme, host, and path only.
+
+    Query strings and fragments are dropped entirely so auth tokens or other
+    secrets carried in URLs never leak through listings or metadata.
+    """
+    if not url or not str(url).strip():
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(str(url).strip())
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, "", "")
+        )
+    except Exception:
+        return ""
 
 
 def build_robots(base_url: str) -> str:
@@ -899,10 +921,18 @@ def docs_page(base_url: str = "/") -> str:
       session. Removing raw recordings preserves the public video but makes
       rerender unavailable.</p>
     </div>
-    <div class="tool card"><h3><code>delete_session(session_id, confirm)</code></h3>
+    <div class="tool card"><h3><code>delete_session(session_id, confirm, force)</code></h3>
       <p>Delete one finished session, including its public MP4, raw recording,
       screenshots, narration clips, storyboard metadata, and theater entry.
-      This requires <code>confirm=true</code> and never deletes active sessions.</p>
+      This requires <code>confirm=true</code>. Active sessions are protected
+      unless <code>force=true</code> is passed, which aborts any live runtime
+      and removes stale sessions orphaned by a restart.</p>
+    </div>
+    <div class="tool card"><h3><code>act_batch(session_id, steps)</code></h3>
+      <p>Run up to 20 actions in one call. Each step is
+      <code>{"action": ..., "narration": ...}</code> with the same contract as
+      <code>act</code>. Steps execute in order and stop at the first failure,
+      returning one result per executed step plus the final screenshot.</p>
     </div>
     <h2>The storyboard workflow</h2>
     <p>Give the agent a product story, then let it loop: call
@@ -1019,7 +1049,7 @@ async def videos_api(request: Request) -> Response:
         [
             {
                 "id": video["id"],
-                "start_url": video["start_url"],
+                "start_url": sanitize_public_url(video["start_url"]),
                 "title": clean_display_title(video.get("title") or video["start_url"]),
                 "duration_seconds": video["duration_seconds"],
                 "finished_at": video["finished_at"],
@@ -1118,9 +1148,10 @@ async def observe(session_id: str) -> CallToolResult:
     return feedback_result(payload, screenshot)
 
 
-@mcp.tool()
-async def act(session_id: str, action: dict, narration: str = "") -> CallToolResult:
-    """Perform exactly one browser action, optionally narrating it."""
+async def _run_action(
+    session_id: str, action: object, narration: str
+) -> tuple[dict, object]:
+    """Validate and perform one action, persisting its storyboard step."""
     session = sessions[session_id]
     try:
         parsed_action = Action.model_validate(action)
@@ -1140,7 +1171,7 @@ async def act(session_id: str, action: dict, narration: str = "") -> CallToolRes
             "invalid_action",
             session.voice,
         )
-        return feedback_result(payload, screenshot)
+        return payload, screenshot
     payload, screenshot = await session.act(parsed_action, narration)
     store.append_step(
         session_id,
@@ -1156,7 +1187,65 @@ async def act(session_id: str, action: dict, narration: str = "") -> CallToolRes
         (payload.get("error") or {}).get("type"),
         session.voice,
     )
+    return payload, screenshot
+
+
+@mcp.tool()
+async def act(session_id: str, action: dict, narration: str = "") -> CallToolResult:
+    """Perform exactly one browser action, optionally narrating it."""
+    payload, screenshot = await _run_action(session_id, action, narration)
     return feedback_result(payload, screenshot)
+
+
+MAX_BATCH_STEPS = 20
+
+
+@mcp.tool()
+async def act_batch(session_id: str, steps: list[dict]) -> CallToolResult:
+    """Perform a sequence of browser actions in a single call.
+
+    Each step is ``{"action": {...}, "narration": "..."}`` using the same
+    action contract as ``act``. Steps run in order and execution stops at
+    the first failed step, so a director can record a whole beat (click,
+    settle, annotate) without extra round trips. The response carries one
+    result per executed step plus the screenshot of the last executed step.
+    """
+    if session_id not in sessions:
+        return feedback_result(
+            {"ok": False, "error": {"type": "unknown_session", "message": session_id}}
+        )
+    if not steps:
+        return feedback_result(
+            {"ok": False, "error": {"type": "invalid_batch", "message": "steps must be a non-empty list"}}
+        )
+    if len(steps) > MAX_BATCH_STEPS:
+        return feedback_result(
+            {"ok": False, "error": {"type": "invalid_batch", "message": f"at most {MAX_BATCH_STEPS} steps per batch"}}
+        )
+    results: list[dict] = []
+    screenshot = None
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("action"), dict):
+            session = sessions[session_id]
+            payload, screenshot = await session.error_result(
+                "invalid_batch", f"step {index} must be an object with an action"
+            )
+            results.append(payload)
+            break
+        payload, screenshot = await _run_action(
+            session_id, step["action"], str(step.get("narration") or "")
+        )
+        results.append(payload)
+        if not payload.get("ok"):
+            break
+    summary = {
+        "ok": bool(results) and all(step.get("ok") for step in results),
+        "completed": sum(1 for step in results if step.get("ok")),
+        "executed": len(results),
+        "remaining": len(steps) - len(results),
+        "steps": results,
+    }
+    return feedback_result(summary, screenshot)
 
 
 @mcp.tool()
@@ -1188,8 +1277,11 @@ async def get_status(session_id: str) -> dict:
 
 @mcp.tool()
 async def list_sessions(limit: int = 20) -> list[dict]:
-    """List recent recording sessions from durable metadata."""
-    return store.list_sessions(limit)
+    """List recent recording sessions with token-free start URLs."""
+    sessions_found = store.list_sessions(limit)
+    for session in sessions_found:
+        session["start_url"] = sanitize_public_url(session.get("start_url"))
+    return sessions_found
 
 
 @mcp.tool()
@@ -1640,15 +1732,38 @@ async def prune(
 
 
 @mcp.tool()
-async def delete_session(session_id: str, confirm: bool = False) -> dict:
-    """Delete one finished session after explicit confirmation."""
+async def delete_session(
+    session_id: str, confirm: bool = False, force: bool = False
+) -> dict:
+    """Delete one finished session after explicit confirmation.
+
+    With ``force=True`` a stale active session (for example one orphaned by
+    a server restart) is also removed: any live browser runtime is aborted
+    first, then media and metadata are deleted.
+    """
     if not confirm:
         return {
             "deleted": False,
             "session_id": session_id,
             "reason": "confirmation_required",
         }
-    return await asyncio.to_thread(retention.delete_session_storage, session_id.strip())
+    session_id = session_id.strip()
+    live = sessions.get(session_id)
+    if live is not None:
+        if not force:
+            return {
+                "deleted": False,
+                "session_id": session_id,
+                "reason": "active_session_requires_force",
+            }
+        try:
+            await live.abort()
+        except Exception:
+            pass
+        sessions.pop(session_id, None)
+    return await asyncio.to_thread(
+        retention.delete_session_storage, session_id, force
+    )
 
 
 @mcp.custom_route(
