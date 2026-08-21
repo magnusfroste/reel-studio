@@ -161,6 +161,11 @@ intent, and whether the visual result matched the narration.
 When shots exist, `finish` acts as a quality gate and refuses to publish until
 every shot is explicitly verified. If a live focus text is missing,
 `verify_shot` records `needs_review` automatically.
+Use `review_session` to run an automated post-recording quality check: scanning for
+accidental secrets or tokens in URLs and storyboard metadata, verifying focus-narration
+alignment, and checking ending quality before publishing.
+Watch finished videos on `/theater` or directly on `/watch/{session_id}` with
+a full storyboard breakdown and MP4 download links.
 `scroll_to_text` finds visible text,
 scrolls it into view, and returns its bounding box. Use `assert_visible` to
 check text without adding a storyboard step or changing the recording.

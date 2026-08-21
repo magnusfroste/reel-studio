@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import urllib.parse
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -238,6 +239,7 @@ The director can declare and verify shot intent with `begin_shot` and `verify_sh
 Observed refs are semantic (for example `button:new-contact`) rather than
 position-only indexes. Use `select_option` for native/custom dropdowns and
 `press_key` for keyboard-driven controls.
+Use `review_session` before finishing to scan for leaked secrets or focus defects.
 Edit finished narration with `update_step_narration`, then use `rerender`.
 Storage retention uses `REEL_MAX_CLIPS` and `REEL_KEEP_RAW_CLIPS`; call the
 token-protected `prune` tool to clean old finished sessions manually.
@@ -265,6 +267,34 @@ def build_sitemap(base_url: str) -> str:
         f"{urls}\n"
         "</urlset>\n"
     )
+
+
+def clean_display_title(title_or_url: str | None) -> str:
+    """Return a safe, readable title stripped of tokens, passwords, and query blobs."""
+    if not title_or_url or not str(title_or_url).strip():
+        return "Untitled Demo"
+    text = str(title_or_url).strip()
+    if text.startswith(("http://", "https://")):
+        try:
+            parsed = urllib.parse.urlsplit(text)
+            path = parsed.path.strip("/")
+            if path:
+                last_segment = path.split("/")[-1]
+                slug = re.sub(r"[-_]+", " ", last_segment).strip()
+                if slug:
+                    return slug.title()
+            netloc = parsed.netloc.split(":")[0]
+            parts = [p for p in netloc.split(".") if p and p not in {"www", "com", "org", "net", "io", "app"}]
+            if parts:
+                return parts[-1].capitalize() + " Demo"
+            return "Web Demo"
+        except Exception:
+            return "Product Demo"
+    # Mask parameters or tokens if present
+    cleaned = re.sub(r"(?:[?&/]|(?<=\s))(?:token|auth|key|secret|password|access_token)=[^&#\s]+", lambda m: m.group(0).split("=")[0] + "=[REDACTED]", text, flags=re.IGNORECASE)
+    # Remove raw token strings
+    cleaned = re.sub(r"\b(?:eyJ[a-zA-Z0-9_-]{10,}|[0-9a-fA-F]{32,64})\b", "[REDACTED]", cleaned)
+    return cleaned.strip() or "Product Demo"
 
 
 def build_robots(base_url: str) -> str:
@@ -355,15 +385,23 @@ def format_duration(duration: float | None) -> str:
 
 def video_card(session: dict) -> str:
     session_id = html.escape(session["id"], quote=True)
-    title = html.escape(session["start_url"])
+    raw_title = session.get("title") or session.get("start_url") or "Video Demo"
+    display_title = clean_display_title(raw_title)
+    title = html.escape(display_title)
     duration = html.escape(format_duration(session.get("duration_seconds")))
     finished_at = html.escape(session.get("finished_at") or "Recently finished")
     return f"""
     <article class="video-card card" data-session-id="{session_id}">
-      <video controls preload="metadata" src="{video_url(session_id)}"></video>
+      <a href="/watch/{session_id}" style="display:block; text-decoration:none;">
+        <video controls preload="metadata" src="{video_url(session_id)}"></video>
+      </a>
       <div class="video-card-body">
-        <h3>{title}</h3>
+        <h3><a href="/watch/{session_id}" style="color:inherit;">{title}</a></h3>
         <p class="muted">{duration} · {finished_at}</p>
+        <div style="margin-top:10px; display:flex; gap:10px;">
+          <a class="button secondary" style="font-size:0.85rem; padding:6px 12px;" href="/watch/{session_id}">Watch Theater</a>
+          <a class="button secondary" style="font-size:0.85rem; padding:6px 12px;" href="{video_url(session_id)}" download>Download</a>
+        </div>
       </div>
     </article>"""
 
@@ -385,7 +423,7 @@ def video_refresh_script(container_id: str, featured: bool = False) -> str:
         const body = document.createElement("div");
         body.className = "video-card-body";
         const heading = document.createElement("h3");
-        heading.textContent = item.start_url;
+        heading.textContent = item.title || item.start_url || "Video Demo";
         const meta = document.createElement("p");
         meta.className = "muted";
         meta.textContent = `${{item.duration_seconds == null ? "Duration unavailable" : item.duration_seconds.toFixed(1) + "s"}} · ${{item.finished_at || "Recently finished"}}`;
@@ -490,6 +528,70 @@ def landing_page(base_url: str = "/") -> str:
     return page_shell(
         "Autonomous product demos", content, description, "/", base_url,
         structured_data,
+    )
+
+
+def watch_page(session_id: str, base_url: str = "/") -> str | None:
+    """Render a dedicated theater and watch view for a single finished session."""
+    session = store.get_session(session_id)
+    if not session or session.get("status") != "finished":
+        return None
+    raw_title = session.get("title") or session.get("start_url") or "Video Demo"
+    title = clean_display_title(raw_title)
+    duration = format_duration(session.get("duration_seconds"))
+    finished_at = session.get("finished_at") or "Recently finished"
+    steps = session.get("steps", [])
+    
+    step_items = []
+    for step in steps:
+        idx = step.get("idx", 0) + 1
+        narration = step.get("narration_text") or ""
+        action_type = step.get("action_type") or "step"
+        target = step.get("target") or ""
+        offset = f"{step.get('offset_seconds', 0.0):.1f}s"
+        step_items.append(
+            f"""<li style="margin-bottom:12px; padding:10px; background:#1b2130; border-radius:8px;">
+                <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                    <strong style="color:#8ea7ff;">Step {idx}: {html.escape(action_type)} {html.escape(target)}</strong>
+                    <span class="muted">{offset}</span>
+                </div>
+                <p style="margin:0; font-size:0.95rem; color:#dbe2ff;">{html.escape(narration) if narration else '<span class=\"muted\">(No narration)</span>'}</p>
+            </li>"""
+        )
+    steps_html = "".join(step_items) if step_items else '<li class="muted">No step breakdown recorded.</li>'
+
+    content = f"""
+    <section class="hero" style="padding-bottom: 24px; padding-top: 40px;">
+      <div style="margin-bottom: 16px;">
+        <a href="/theater" style="color:#8ea7ff; text-decoration:none;">← Back to Theater</a>
+      </div>
+      <div class="eyebrow">Product Walkthrough</div>
+      <h1 style="font-size: clamp(2.2rem, 5vw, 3.8rem);">{html.escape(title)}</h1>
+      <p class="muted">{html.escape(duration)} · {html.escape(finished_at)}</p>
+    </section>
+    
+    <div style="background:#080b11; border:1px solid #2a354d; border-radius:14px; overflow:hidden; margin-bottom:32px;">
+      <video controls autoplay preload="auto" style="width:100%; max-height:75vh; display:block;" src="{video_url(session_id)}"></video>
+    </div>
+
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px; margin-bottom:32px;">
+      <div style="display:flex; gap:12px;">
+        <a class="button" href="{video_url(session_id)}" download>Download MP4</a>
+        <a class="button secondary" href="/theater">All Videos</a>
+      </div>
+    </div>
+
+    <h2>Storyboard & Narration Script</h2>
+    <ol style="list-style:none; padding:0;">
+      {steps_html}
+    </ol>
+    """
+    return page_shell(
+        title,
+        content,
+        f"Watch the narrated demo for {title}.",
+        f"/watch/{session_id}",
+        base_url,
     )
 
 
@@ -742,6 +844,10 @@ def docs_page(base_url: str = "/") -> str:
     <p class="muted">If a session has storyboard shots, <code>finish</code> refuses
     to publish while any shot is still <code>planned</code> or
     <code>needs_review</code>.</p>
+    <div class="tool card"><h3><code>review_session(session_id)</code></h3>
+      <p>Analyze storyboard steps and session metadata for security issues
+      (accidental tokens, credentials, and URL secrets), focus/narration alignment,
+      and ending quality before finishing or publishing.</p></div>
     <div class="tool card"><h3><code>update_step_narration(session_id, index, narration, voice?)</code></h3>
       <p>Replace the narration text (and optionally the voice) for one step
       in a finished session. The recorded browser video is not changed.</p>
@@ -893,6 +999,19 @@ async def theater(request: Request) -> Response:
     return HTMLResponse(theater_page(base))
 
 
+@mcp.custom_route("/watch/{session_id}", methods=["GET"], include_in_schema=False)
+async def watch(request: Request) -> Response:
+    """Serve the dedicated theater watch page for a specific video."""
+    session_id = request.path_params["session_id"]
+    if not re.fullmatch(r"[0-9a-f]+", session_id):
+        return HTMLResponse("<h1>Video not found</h1>", status_code=404)
+    base = str(request.base_url).rstrip("/")
+    html_content = watch_page(session_id, base)
+    if not html_content:
+        return HTMLResponse("<h1>Video not found or still processing</h1>", status_code=404)
+    return HTMLResponse(html_content)
+
+
 @mcp.custom_route("/api/videos", methods=["GET"], include_in_schema=False)
 async def videos_api(request: Request) -> Response:
     """Return finished videos for public theater refreshes."""
@@ -901,7 +1020,7 @@ async def videos_api(request: Request) -> Response:
             {
                 "id": video["id"],
                 "start_url": video["start_url"],
-                "title": video["start_url"],
+                "title": clean_display_title(video.get("title") or video["start_url"]),
                 "duration_seconds": video["duration_seconds"],
                 "finished_at": video["finished_at"],
             }
@@ -1332,6 +1451,114 @@ async def update_backlog(
 
 
 @mcp.tool()
+async def review_session(session_id: str) -> dict:
+    """Analyze a recording or finished session for secret leakage, narration alignment, and ending quality."""
+    session = store.get_session(session_id)
+    if session is None:
+        return {
+            "ok": False,
+            "error": {
+                "type": "unknown_session",
+                "message": f"Unknown session_id: {session_id}",
+            },
+        }
+    
+    findings: list[dict] = []
+    
+    # 1. Secret and Token Leak Scan
+    secret_patterns = [
+        (re.compile(r"([?&])(?:token|auth|key|secret|password|access_token)=([^&#\s]+)", re.IGNORECASE), "URL auth/token parameter"),
+        (re.compile(r"\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b"), "JWT token string"),
+        (re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b"), "GitHub token"),
+        (re.compile(r"\b(?:sk|pk)_[a-zA-Z0-9]{20,}\b"), "API key"),
+    ]
+    
+    # Check session metadata
+    for field in ("start_url", "title", "subtitle", "cta_url"):
+        val = str(session.get(field) or "")
+        for pat, label in secret_patterns:
+            if pat.search(val):
+                findings.append({
+                    "category": "security_secret_leak",
+                    "severity": "high",
+                    "location": f"session.{field}",
+                    "message": f"Potential secret or token detected in {field} ({label})",
+                })
+                
+    # Check steps
+    steps = session.get("steps", [])
+    total_narration_words = 0
+    for step in steps:
+        idx = step.get("idx", 0)
+        for field in ("url", "title", "narration_text", "target"):
+            val = str(step.get(field) or "")
+            for pat, label in secret_patterns:
+                if pat.search(val):
+                    findings.append({
+                        "category": "security_secret_leak",
+                        "severity": "high",
+                        "location": f"step[{idx}].{field}",
+                        "message": f"Potential secret or token detected in step {idx+1} {field} ({label})",
+                    })
+        narration = (step.get("narration_text") or "").strip()
+        if narration:
+            total_narration_words += len(narration.split())
+            
+        # 2. Focus and Narration Alignment check
+        action_type = step.get("action_type")
+        target = step.get("target") or ""
+        duration = step.get("narration_duration", 0.0) or 0.0
+        if action_type in {"click", "click_and_wait", "annotate"} and not narration and len(steps) > 1:
+            findings.append({
+                "category": "focus_narration_alignment",
+                "severity": "low",
+                "location": f"step[{idx}]",
+                "message": f"Visual emphasis action '{action_type}' on '{target}' has no accompanying narration",
+            })
+            
+    # 3. Ending Quality & Structure
+    if not steps:
+        findings.append({
+            "category": "ending_quality",
+            "severity": "high",
+            "location": "session",
+            "message": "Session has no recorded storyboard steps",
+        })
+    else:
+        last_step = steps[-1]
+        last_narration = (last_step.get("narration_text") or "").strip()
+        last_duration = last_step.get("narration_duration", 0.0) or 0.0
+        if last_step.get("action_type") in {"type", "scroll"} and not last_narration:
+            findings.append({
+                "category": "ending_quality",
+                "severity": "medium",
+                "location": f"step[{last_step.get('idx', 0)}]",
+                "message": "Video finishes abruptly on a mechanical action without a closing hold or wrap-up narration",
+            })
+            
+    # Pedagogical pacing score
+    score = 100
+    for f in findings:
+        if f["severity"] == "high":
+            score -= 35
+        elif f["severity"] == "medium":
+            score -= 15
+        elif f["severity"] == "low":
+            score -= 5
+    score = max(0, score)
+    
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "director_score": score,
+        "quality_status": "excellent" if score >= 85 else ("acceptable" if score >= 60 else "needs_revision"),
+        "step_count": len(steps),
+        "total_narration_words": total_narration_words,
+        "findings": findings,
+    }
+
+
+@mcp.tool()
 async def finish(session_id: str) -> dict:
     """Stop recording and render the final MP4."""
     session = sessions.get(session_id)
@@ -1449,6 +1676,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         public_video = re.fullmatch(r"/videos/[^/]+/video\.mp4", request.url.path)
+        public_watch = re.fullmatch(r"/watch/[^/]+", request.url.path)
         if request.method in {"GET", "HEAD"} and (
             request.url.path in {
                 "/",
@@ -1468,6 +1696,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 "/api/bug_reports",
             }
             or public_video
+            or public_watch
         ):
             return await call_next(request)
         authorization = request.headers.get("authorization", "")

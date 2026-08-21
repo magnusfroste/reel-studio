@@ -53,10 +53,20 @@ def test_click_and_wait_action_carries_settle_contract():
         wait_for_text="Contacts",
         target_text="Contacts",
         settle_ms=700,
+        narration_timing="after_settle",
     )
     assert action.type == "click_and_wait"
     assert action.narration_timing == "after_settle"
     assert action.target_text == "Contacts"
+
+
+def test_narration_timing_options():
+    action_before = Action(type="click", ref="btn", narration_timing="before_action")
+    action_after = Action(type="click", ref="btn", narration_timing="after_action")
+    action_settle = Action(type="click", ref="btn", narration_timing="after_settle")
+    assert action_before.narration_timing == "before_action"
+    assert action_after.narration_timing == "after_action"
+    assert action_settle.narration_timing == "after_settle"
 
 
 def test_annotation_hold_covers_longer_visual_or_audio_window():
