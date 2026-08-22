@@ -70,6 +70,9 @@ def test_watch_page_renders_theater_and_steps(tmp_path, monkeypatch):
     store.append_step(session_id, "click_and_wait", "button:create-lead", "https://crm.test/leads", "Leads", "Let's create a lead.", 2.5, 0.0, None, True, None)
     store.finish_session(session_id, str(tmp_path / session_id / "video.mp4"), None, 5.0)
 
+    listed = store.list_finished_sessions()
+    assert listed[0]["title"] == "Leads Overview Demo"
+
     html = watch_page(session_id, "https://example.test")
     assert html is not None
     assert "Leads Overview Demo" in html

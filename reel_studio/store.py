@@ -334,7 +334,7 @@ def list_finished_sessions() -> list[dict[str, Any]]:
     with _lock, _connect() as connection:
         rows = connection.execute(
             """
-            SELECT id, start_url, duration_seconds, finished_at, video_path,
+            SELECT id, start_url, title, duration_seconds, finished_at, video_path,
                    video_url, output_dir
             FROM sessions
             WHERE status = 'finished'
