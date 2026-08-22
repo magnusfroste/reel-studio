@@ -567,10 +567,14 @@ def watch_page(session_id: str, base_url: str = "/") -> str | None:
     step_items = []
     for step in steps:
         idx = step.get("idx", 0) + 1
-        narration = step.get("narration_text") or ""
-        action_type = step.get("action_type") or "step"
-        target = step.get("target") or ""
-        offset = f"{step.get('offset_seconds', 0.0):.1f}s"
+        narration = str(step.get("narration_text") or "")
+        action_type = str(step.get("action_type") or "step")
+        target = str(step.get("target") or "")
+        try:
+            offset_seconds = float(step.get("offset_seconds") or 0.0)
+        except (TypeError, ValueError):
+            offset_seconds = 0.0
+        offset = f"{offset_seconds:.1f}s"
         step_items.append(
             f"""<li style="margin-bottom:12px; padding:10px; background:#1b2130; border-radius:8px;">
                 <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
@@ -1542,9 +1546,33 @@ async def update_backlog(
     return item
 
 
+def _extract_review_frames(session_id: str, video_path: Path, duration: float | None) -> list[dict]:
+    """Extract stable representative JPEGs for human/editorial review."""
+    if not video_path.is_file() or not duration or duration <= 0:
+        return []
+    review_dir = video_path.parent / "review_frames"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    labels = (("opening", 0.05), ("transition", 0.35), ("focus", 0.65), ("ending", 0.92))
+    frames: list[dict] = []
+    for label, ratio in labels:
+        timestamp = min(max(duration * ratio, 0.0), max(duration - 0.05, 0.0))
+        frame_path = review_dir / f"{label}.jpg"
+        command = [
+            "ffmpeg", "-y", "-ss", f"{timestamp:.3f}", "-i", str(video_path),
+            "-frames:v", "1", "-q:v", "3", str(frame_path),
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if frame_path.is_file() and frame_path.stat().st_size > 0:
+            frames.append({"label": label, "timestamp_seconds": round(timestamp, 3), "path": str(frame_path)})
+    return frames
+
+
 @mcp.tool()
 async def review_session(session_id: str) -> dict:
-    """Analyze a recording or finished session for secret leakage, narration alignment, and ending quality."""
+    """Analyze a recording or finished session for secrets, alignment, pacing, and review frames."""
     session = store.get_session(session_id)
     if session is None:
         return {
@@ -1638,6 +1666,12 @@ async def review_session(session_id: str) -> dict:
         elif f["severity"] == "low":
             score -= 5
     score = max(0, score)
+    video_path_value = session.get("video_path")
+    video_path = Path(video_path_value) if isinstance(video_path_value, str) and video_path_value else None
+    review_frames = (
+        _extract_review_frames(session_id, video_path, session.get("duration_seconds"))
+        if video_path is not None else []
+    )
     
     return {
         "ok": True,
@@ -1646,6 +1680,7 @@ async def review_session(session_id: str) -> dict:
         "quality_status": "excellent" if score >= 85 else ("acceptable" if score >= 60 else "needs_revision"),
         "step_count": len(steps),
         "total_narration_words": total_narration_words,
+        "review_frames": review_frames,
         "findings": findings,
     }
 
@@ -1707,12 +1742,17 @@ async def finish(session_id: str) -> dict:
         video_url,
         duration,
     )
+    # A finished MP4 is not automatically an editorially safe deliverable.
+    # Run the durable review while the session metadata is still available and
+    # return the report alongside the artifact so callers cannot silently skip
+    # the quality/security gate.
+    review = await review_session(session_id)
     try:
         await asyncio.to_thread(retention.prune_from_env)
     except Exception:
         pass
     sessions.pop(session_id, None)
-    return {"video_path": str(video_path), "video_url": video_url}
+    return {"video_path": str(video_path), "video_url": video_url, "review": review}
 
 
 @mcp.tool()

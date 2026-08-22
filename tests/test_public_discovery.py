@@ -76,3 +76,33 @@ def test_watch_page_renders_theater_and_steps(tmp_path, monkeypatch):
     assert "Let&#x27;s create a lead." in html or "Let's create a lead." in html
     assert f"/videos/{session_id}/video.mp4" in html
     assert "/theater" in html
+
+
+def test_watch_page_tolerates_legacy_step_types(monkeypatch):
+    from reel_studio import store
+    session_id = "deadbeef"
+    monkeypatch.setattr(
+        store,
+        "get_session",
+        lambda requested_id: {
+            "id": requested_id,
+            "status": "finished",
+            "title": "Legacy Demo",
+            "start_url": "https://crm.test/auth",
+            "duration_seconds": 5.0,
+            "finished_at": "2026-08-22T00:00:00+00:00",
+            "steps": [{
+                "idx": 0,
+                "action_type": 123,
+                "target": 456,
+                "narration_text": "Continue",
+                "offset_seconds": "2.5",
+            }],
+        },
+    )
+
+    html = watch_page(session_id, "https://example.test")
+
+    assert html is not None
+    assert "Step 1: 123 456" in html
+    assert "2.5s" in html
