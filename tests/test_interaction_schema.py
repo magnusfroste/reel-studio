@@ -79,3 +79,14 @@ def test_annotation_script_tracks_target_layout_changes():
     assert "ResizeObserver" in script
     assert "getBoundingClientRect" in script
     assert "window.addEventListener(\"scroll\"" in script
+
+
+def test_annotation_script_compensates_for_document_zoom():
+    script = annotation_script()
+    assert "getComputedStyle(document.documentElement).zoom" in script
+    assert "rect.left / z" in script
+    assert "rect.width / z" in script
+
+    # The overlay coordinates are assigned in the zoomed document's coordinate
+    # system, while getBoundingClientRect returns viewport coordinates.
+    assert "const z = zoomFactor()" in script

@@ -72,10 +72,22 @@ def annotation_script() -> str:
   }
   root.appendChild(group);
   const target = spec.selector ? document.querySelector(spec.selector) : null;
+  // documentElement CSS zoom scales fixed-position descendants a second time,
+  // so viewport coordinates must be divided back before assigning left/top.
+  const zoomFactor = () => {
+    try {
+      const value = parseFloat(getComputedStyle(document.documentElement).zoom);
+      return Number.isFinite(value) && value > 0 ? value : 1;
+    } catch { return 1; }
+  };
   const update = () => {
     const rect = target?.getBoundingClientRect?.() || spec.box;
     if (!rect) return;
-    const {x, y, width, height} = rect;
+    const z = zoomFactor();
+    const {x, y, width, height} = {
+      x: rect.left / z, y: rect.top / z,
+      width: rect.width / z, height: rect.height / z,
+    };
     Object.assign(box.style, {
       left:`${x-10}px`, top:`${y-10}px`,
       width:`${width+20}px`, height:`${height+20}px`,
