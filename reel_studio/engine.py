@@ -231,6 +231,7 @@ class BrowserSession:
         await target.evaluate(
             """(el) => {
                 const rect = el.getBoundingClientRect();
+                const accent = 'rgba(255, 193, 7, 0.95)';
                 const node = document.createElement('div');
                 node.dataset.videoDirectorSpotlight = 'true';
                 Object.assign(node.style, {
@@ -239,7 +240,7 @@ class BrowserSession:
                     top: `${rect.top - 14}px`,
                     width: `${rect.width + 28}px`,
                     height: `${rect.height + 28}px`,
-                    border: '3px solid rgba(255, 193, 7, 0.95)',
+                    border: `3px solid ${accent}`,
                     borderRadius: '18px',
                     boxShadow: '0 0 0 6px rgba(255, 193, 7, 0.3), 0 0 30px 12px rgba(255, 193, 7, 0.75)',
                     pointerEvents: 'none',
@@ -248,12 +249,43 @@ class BrowserSession:
                     transform: 'scale(0.94)',
                     opacity: '1',
                 });
-                document.body.appendChild(node);
+                const halo = document.createElement('div');
+                halo.dataset.videoDirectorCursorHalo = 'true';
+                Object.assign(halo.style, {
+                    position: 'fixed',
+                    left: `${rect.left + rect.width / 2 - 18}px`,
+                    top: `${rect.top + rect.height / 2 - 18}px`,
+                    width: '36px', height: '36px', borderRadius: '50%',
+                    border: `2px solid ${accent}`,
+                    boxShadow: '0 0 0 4px rgba(255, 193, 7, 0.28), 0 0 22px rgba(255, 193, 7, 0.8)',
+                    pointerEvents: 'none', zIndex: '2147483647',
+                    animation: 'cursor-halo 900ms ease-out',
+                });
+                const pulse = document.createElement('div');
+                pulse.dataset.videoDirectorClickPulse = 'true';
+                Object.assign(pulse.style, {
+                    position: 'fixed',
+                    left: `${rect.left + rect.width / 2 - 7}px`,
+                    top: `${rect.top + rect.height / 2 - 7}px`,
+                    width: '14px', height: '14px', borderRadius: '50%',
+                    background: accent, pointerEvents: 'none', zIndex: '2147483647',
+                    animation: 'click-pulse 650ms ease-out',
+                });
+                const style = document.createElement('style');
+                style.dataset.videoDirectorSpotlightStyle = 'true';
+                style.textContent = `
+                    @keyframes cursor-halo { from { transform: scale(.72); opacity: .95; } to { transform: scale(1.45); opacity: 0; } }
+                    @keyframes click-pulse { from { transform: scale(.7); opacity: .95; } to { transform: scale(3.2); opacity: 0; } }
+                `;
+                document.head.appendChild(style);
+                document.body.append(node, halo, pulse);
                 requestAnimationFrame(() => {
                     node.style.transform = 'scale(1.04)';
                     node.style.opacity = '0';
                 });
-                setTimeout(() => node.remove(), 500);
+                setTimeout(() => {
+                    node.remove(); halo.remove(); pulse.remove(); style.remove();
+                }, 900);
             }"""
         )
 

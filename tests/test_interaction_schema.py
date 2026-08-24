@@ -99,3 +99,30 @@ def test_annotation_script_places_labels_using_available_viewport_space():
     assert "aboveY" in script
     assert "belowY" in script
     assert "viewportHeight - 8" in script
+
+
+def test_click_feedback_uses_a_visible_cursor_halo_and_pulse():
+    from reel_studio.engine import BrowserSession
+
+    source = BrowserSession._inject_spotlight.__code__
+    assert source.co_consts
+    script = next(value for value in source.co_consts if isinstance(value, str) and "videoDirectorSpotlight" in value)
+    assert "videoDirectorCursorHalo" in script
+    assert "videoDirectorClickPulse" in script
+    assert "animation: 'cursor-halo 900ms ease-out'" in script
+    assert "setTimeout(() => {" in script
+    assert "}, 900);" in script
+
+
+def test_click_feedback_is_not_a_single_frame_flash():
+    from reel_studio.engine import BrowserSession
+
+    source = BrowserSession._inject_spotlight.__code__
+    script = next(value for value in source.co_consts if isinstance(value, str) and "videoDirectorSpotlight" in value)
+    assert "transition: 'opacity 420ms ease, transform 420ms ease'" in script
+    assert "animation: 'click-pulse 650ms ease-out'" in script
+    assert "@keyframes click-pulse" in script
+    assert "@keyframes cursor-halo" in script
+    assert "cursor-halo" in script
+    assert "click-pulse" in script
+    assert "900" in script
