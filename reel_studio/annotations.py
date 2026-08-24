@@ -92,9 +92,27 @@ def annotation_script() -> str:
       left:`${x-10}px`, top:`${y-10}px`,
       width:`${width+20}px`, height:`${height+20}px`,
     });
-    if (label) Object.assign(label.style, {
-      left:`${Math.max(8, x)}px`, top:`${Math.max(8, y-48)}px`,
-    });
+    if (label) {
+      // Measure after the label is in the DOM and choose the side with room.
+      // Coordinates are in the unzoomed fixed-layer coordinate system.
+      const labelWidth = label.offsetWidth || 240;
+      const labelHeight = label.offsetHeight || 36;
+      const viewportWidth = window.innerWidth / z;
+      const viewportHeight = window.innerHeight / z;
+      const gap = 12;
+      const labelX = Math.min(
+        Math.max(8, x + (width - labelWidth) / 2),
+        Math.max(8, viewportWidth - labelWidth - 8),
+      );
+      const aboveY = y - labelHeight - gap;
+      const belowY = y + height + gap;
+      const labelY = aboveY >= 8 ? aboveY : (
+        belowY + labelHeight <= viewportHeight - 8 ? belowY : Math.max(8, aboveY)
+      );
+      Object.assign(label.style, {
+        left:`${labelX}px`, top:`${labelY}px`,
+      });
+    }
   };
   update();
   if (target && spec.follow_target !== false) {

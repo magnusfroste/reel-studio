@@ -90,3 +90,12 @@ def test_annotation_script_compensates_for_document_zoom():
     # The overlay coordinates are assigned in the zoomed document's coordinate
     # system, while getBoundingClientRect returns viewport coordinates.
     assert "const z = zoomFactor()" in script
+
+
+def test_annotation_script_places_labels_using_available_viewport_space():
+    script = annotation_script()
+    assert "label.offsetWidth" in script
+    assert "label.offsetHeight" in script
+    assert "aboveY" in script
+    assert "belowY" in script
+    assert "viewportHeight - 8" in script
