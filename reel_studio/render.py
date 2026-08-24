@@ -7,6 +7,7 @@ import signal
 import subprocess
 import tempfile
 from typing import Sequence
+import textwrap
 
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -138,6 +139,16 @@ def _escape_drawtext(text: str) -> str:
     )
 
 
+def wrap_card_text(text: str, max_chars: int = 28) -> list[str]:
+    """Wrap title-card text at word boundaries for safe video margins."""
+    text = text.strip()
+    if not text:
+        return []
+    return textwrap.wrap(
+        text, width=max_chars, break_long_words=False, break_on_hyphens=False,
+    ) or [text]
+
+
 def _card(
     output_path: Path,
     width: int,
@@ -148,8 +159,12 @@ def _card(
     if not Path(FONT_PATH).is_file():
         raise RuntimeError(f"Title-card font is missing: {FONT_PATH}")
     drawtext = []
-    center_offset = (len(lines) - 1) * 0.7
-    for index, (text, size) in enumerate(lines):
+    expanded_lines: list[tuple[str, int]] = []
+    for text, size in lines:
+        wrapped = wrap_card_text(text, max_chars=28 if size >= 36 else 54)
+        expanded_lines.extend((line, size) for line in wrapped)
+    center_offset = (len(expanded_lines) - 1) * 0.7
+    for index, (text, size) in enumerate(expanded_lines):
         drawtext.append(
             "drawtext="
             f"fontfile={FONT_PATH}:text='{_escape_drawtext(text)}':"

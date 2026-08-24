@@ -7,6 +7,20 @@ import pytest
 from reel_studio import render
 
 
+def test_card_text_wraps_long_titles_to_readable_lines():
+    lines = render.wrap_card_text(
+        "FlowWink: See the Signal. Move the Business.", max_chars=28
+    )
+    assert lines == ["FlowWink: See the Signal.", "Move the Business."]
+    assert all(len(line) <= 28 for line in lines)
+
+
+def test_card_text_keeps_short_text_on_one_line():
+    assert render.wrap_card_text("Short title", max_chars=28) == ["Short title"]
+
+
+
+
 def _run_ffmpeg(*args: str) -> None:
     subprocess.run(["ffmpeg", "-loglevel", "error", "-y", *args], check=True)
 
