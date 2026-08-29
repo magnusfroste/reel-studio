@@ -135,6 +135,45 @@ def annotation_script() -> str:
 """
 
 
+def caption_script() -> str:
+    """Return a browser function for readable narration-linked captions."""
+    return r"""
+(spec) => {
+  const rootId = "video-director-annotations";
+  let root = document.getElementById(rootId);
+  if (!root) {
+    root = document.createElement("div");
+    root.id = rootId;
+    Object.assign(root.style, {
+      position: "fixed", inset: "0", pointerEvents: "none",
+      zIndex: "2147483647", fontFamily: "Inter, system-ui, sans-serif"
+    });
+    document.documentElement.appendChild(root);
+  }
+  const old = root.querySelector(`[data-annotation-id="${spec.id}"]`);
+  if (old) old.remove();
+  const group = document.createElement("div");
+  group.dataset.annotationId = spec.id;
+  const caption = document.createElement("div");
+  caption.setAttribute("aria-label", spec.label);
+  caption.textContent = spec.label;
+  Object.assign(caption.style, {
+    position: "fixed", left: "50%", bottom: "34px",
+    transform: "translateX(-50%)", maxWidth: "min(900px, calc(100vw - 64px))",
+    padding: "12px 22px", borderRadius: "12px",
+    background: "rgba(16,24,39,.96)", color: "#fff",
+    border: "2px solid #ffd166", fontSize: "22px", fontWeight: "800",
+    lineHeight: "1.25", textAlign: "center",
+    boxShadow: "0 8px 28px rgba(0,0,0,.42)",
+    letterSpacing: ".01em"
+  });
+  group.appendChild(caption);
+  root.appendChild(group);
+  setTimeout(() => group.remove(), spec.duration_ms);
+}
+"""
+
+
 def annotation_hold_seconds(narration_duration: float, annotation_duration: float) -> float:
     """Return the visual hold needed to keep an annotation visible."""
     return max(0.0, narration_duration, annotation_duration)

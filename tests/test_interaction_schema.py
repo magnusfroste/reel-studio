@@ -4,8 +4,22 @@ from reel_studio.annotations import (
     annotation_hold_seconds,
     annotation_id,
     annotation_script,
+    caption_script,
     validate_annotation,
 )
+
+
+def test_caption_action_is_supported():
+    action = Action(type="caption", text="Look at the lead signal", ms=3000)
+    assert action.type == "caption"
+    assert action.text == "Look at the lead signal"
+
+
+def test_caption_script_is_readable_and_fixed_to_viewport():
+    script = caption_script()
+    assert 'fontSize: "22px"' in script
+    assert 'bottom: "34px"' in script
+    assert 'data-annotation-id' in script
 
 
 def test_semantic_ref_uses_role_and_visible_name():

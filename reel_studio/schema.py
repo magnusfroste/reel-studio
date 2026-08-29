@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 class Action(BaseModel):
     type: Literal[
         "goto", "click", "click_and_wait", "type", "select_option", "press_key", "set_zoom", "annotate", "scroll", "scroll_to_text",
-        "hover", "highlight", "wait",
+        "hover", "highlight", "wait", "caption",
     ]
     url: str | None = None
     ref: str | None = None

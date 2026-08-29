@@ -32,6 +32,7 @@ from .annotations import (
     annotation_hold_seconds,
     annotation_id,
     annotation_script,
+    caption_script,
     validate_annotation,
 )
 from .refs import semantic_ref
@@ -412,7 +413,21 @@ class BrowserSession:
                 return await self.error_result("narration_failed", str(exc))
         try:
             action_type = action.type
-            if action_type == "goto":
+            if action_type == "caption":
+                label = (action.text or "").strip()
+                duration_ms = action.ms or max(250, int(round(duration * 1000)))
+                if not label:
+                    return await self.error_result("invalid_action", "caption requires text")
+                if duration_ms > 30000:
+                    return await self.error_result("invalid_action", "caption duration must be 30000 ms or less")
+                self.annotation_counter += 1
+                live_annotation_id = annotation_id("caption", self.annotation_counter)
+                annotation_duration = duration_ms / 1000
+                await self.page.evaluate(
+                    caption_script(),
+                    {"id": live_annotation_id, "label": label, "duration_ms": duration_ms},
+                )
+            elif action_type == "goto":
                 if not action.url:
                     return await self.error_result("invalid_action", "goto requires url")
                 await self.page.goto(action.url, wait_until="domcontentloaded", timeout=15000)
