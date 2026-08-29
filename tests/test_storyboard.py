@@ -79,5 +79,6 @@ def test_review_session_scans_tokens_and_quality(tmp_path, monkeypatch):
     review = asyncio.run(review_session(session_id))
     assert review["ok"] is True
     assert review["step_count"] == 2
-    assert any(f["category"] == "security_secret_leak" for f in review["findings"])
+    assert store.get_session(session_id)["start_url"] == "https://app.test/login"
+    assert not any(f["category"] == "security_secret_leak" for f in review["findings"])
     assert any(f["category"] == "focus_narration_alignment" for f in review["findings"])

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import os
 import sqlite3
 import threading
+import urllib.parse
 from pathlib import Path
 from typing import Any
 import uuid
@@ -160,6 +161,17 @@ def normalize_backlog_status(value: str | None) -> str:
     return normalized if normalized in BACKLOG_STATUSES else "open"
 
 
+def _safe_persisted_url(url: str) -> str:
+    """Persist only the non-sensitive URL components for session metadata."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url).strip())
+        if parsed.scheme and parsed.netloc:
+            return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    except ValueError:
+        pass
+    return ""
+
+
 def create_session(
     session_id: str,
     start_url: str,
@@ -188,7 +200,7 @@ def create_session(
             VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                session_id, start_url, voice, provider, width, height,
+                session_id, _safe_persisted_url(start_url), voice, provider, width, height,
                 output_width, output_height, title, subtitle, accent, cta_url,
                 cta_text, music, _now(), output_dir,
             ),
