@@ -116,6 +116,10 @@ PAGE_STYLES = """
     .button { background: #8ea7ff; border-radius: 9px; color: #10131a; display: inline-block; font-weight: 750; padding: 12px 18px; }
     .button:hover { background: #b8c6ff; text-decoration: none; }
     .button.secondary { background: #1b2438; color: #dbe2ff; }
+    .delete-button { background: #3a1220; border: 1px solid #8f3345; color: #ff9aa8; font-weight: 750; border-radius: 9px; display: inline-block; padding: 6px 12px; font-size: 0.85rem; cursor: pointer; }
+    .delete-button:hover { background: #5a1c2e; }
+    .video-card .delete-button { display: none; }
+    body.managing .video-card .delete-button { display: inline-block; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
     .card, .endpoint { background: #151b28; border: 1px solid #2a354d; border-radius: 14px; padding: 20px; }
     .card p { margin: 0; }
@@ -232,6 +236,8 @@ step is `{{"action": ..., "narration": ...}}` and execution stops on first error
 Finished sessions can be removed explicitly with `delete_session(session_id,
 confirm=true)`; this deletes media and metadata for only that session. Add
 `force=true` to also remove a stale active session orphaned by a restart.
+The theater's Manage mode deletes over HTTP with
+`DELETE /api/videos/{{id}}?confirm=true` and the same bearer token.
 
 Optional `start_session` branding parameters: `title`, `subtitle`, `accent`,
 `cta_url`, `cta_text`, and `music` (`none` or `subtle`).
@@ -423,6 +429,7 @@ def video_card(session: dict) -> str:
         <div style="margin-top:10px; display:flex; gap:10px;">
           <a class="button secondary" style="font-size:0.85rem; padding:6px 12px;" href="/watch/{session_id}">Watch Theater</a>
           <a class="button secondary" style="font-size:0.85rem; padding:6px 12px;" href="{video_url(session_id)}" download>Download</a>
+          <button type="button" class="delete-button" data-delete-id="{session_id}" data-delete-title="{title}">Delete</button>
         </div>
       </div>
     </article>"""
@@ -449,7 +456,13 @@ def video_refresh_script(container_id: str, featured: bool = False) -> str:
         const meta = document.createElement("p");
         meta.className = "muted";
         meta.textContent = `${{item.duration_seconds == null ? "Duration unavailable" : item.duration_seconds.toFixed(1) + "s"}} · ${{item.finished_at || "Recently finished"}}`;
-        body.append(heading, meta);
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "delete-button";
+        del.dataset.deleteId = item.id;
+        del.dataset.deleteTitle = item.title || item.start_url || "Video Demo";
+        del.textContent = "Delete";
+        body.append(heading, meta, del);
         article.append(player, body);
         return article;
       }};
@@ -475,6 +488,80 @@ def video_refresh_script(container_id: str, featured: bool = False) -> str:
       }};
       setInterval(refresh, 10000);
     }})();
+    </script>"""
+
+
+def video_admin_script() -> str:
+    """Client helpers for token-authorized deletion from public pages.
+
+    The delete buttons never expose the server token. The admin supplies it
+    through a browser prompt; it is kept in sessionStorage so a page reload
+    does not re-ask, and every DELETE request still passes the same bearer
+    check that protects the MCP endpoint.
+    """
+    return """<script>
+    (() => {
+      const TOKEN_KEY = "reel-studio-admin-token";
+      const askToken = (retry) => {
+        let token = sessionStorage.getItem(TOKEN_KEY) || "";
+        if (!token || retry) {
+          token = window.prompt(
+            retry
+              ? "That token was rejected. Enter the reel-studio admin token:"
+              : "Enter the reel-studio admin token (the REEL_API_TOKEN):",
+            token);
+          if (token === null) return "";
+          token = token.trim();
+          sessionStorage.setItem(TOKEN_KEY, token);
+        }
+        return token;
+      };
+      const deleteVideo = async (id, title, onDone) => {
+        if (!window.confirm(`Delete "${title}"? This permanently removes the video, its recording, and all metadata.`)) return;
+        let token = askToken(false);
+        if (!token) return;
+        const send = () => fetch(`/api/videos/${id}?confirm=true`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        let response = await send();
+        if (response.status === 401) {
+          sessionStorage.removeItem(TOKEN_KEY);
+          token = askToken(true);
+          if (!token) return;
+          response = await send();
+        }
+        if (!response.ok) {
+          window.alert("Delete failed with status " + response.status + ". The video is still listed.");
+          return;
+        }
+        onDone();
+      };
+      document.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-delete-id]");
+        if (!button) return;
+        event.preventDefault();
+        const article = button.closest(".video-card");
+        deleteVideo(
+          button.dataset.deleteId,
+          button.dataset.deleteTitle || "this video",
+          () => {
+            if (article) {
+              article.remove();
+            } else if (window.location.pathname.startsWith("/watch/")) {
+              window.location.replace("/theater");
+            }
+          },
+        );
+      });
+      const toggle = document.getElementById("manage-toggle");
+      if (toggle) {
+        toggle.addEventListener("click", () => {
+          const managing = document.body.classList.toggle("managing");
+          toggle.textContent = managing ? "Done managing" : "Manage videos";
+        });
+      }
+    })();
     </script>"""
 
 
@@ -604,6 +691,7 @@ def watch_page(session_id: str, base_url: str = "/") -> str | None:
       <div style="display:flex; gap:12px;">
         <a class="button" href="{video_url(session_id)}" download>Download MP4</a>
         <a class="button secondary" href="/theater">All Videos</a>
+        <button type="button" class="delete-button" data-delete-id="{session_id}" data-delete-title="{html.escape(title, quote=True)}">Delete video</button>
       </div>
     </div>
 
@@ -611,6 +699,7 @@ def watch_page(session_id: str, base_url: str = "/") -> str | None:
     <ol style="list-style:none; padding:0;">
       {steps_html}
     </ol>
+    {video_admin_script()}
     """
     return page_shell(
         title,
@@ -633,11 +722,13 @@ def theater_page(base_url: str = "/") -> str:
       <h1>Theater.</h1>
       <p class="lede">Watch the latest narrated product stories created by
       reel-studio agents.</p>
+      <button id="manage-toggle" class="button secondary" type="button" style="margin-top:16px;">Manage videos</button>
     </section>
     <div id="theater-videos" class="theater-grid">
       {cards}
     </div>
     {video_refresh_script("theater-videos")}
+    {video_admin_script()}
     """
     return page_shell(
         "Public video theater",
@@ -931,6 +1022,10 @@ def docs_page(base_url: str = "/") -> str:
       This requires <code>confirm=true</code>. Active sessions are protected
       unless <code>force=true</code> is passed, which aborts any live runtime
       and removes stale sessions orphaned by a restart.</p>
+      <p><strong>HTTP:</strong> <code>DELETE /api/videos/{session_id}?confirm=true</code>
+      performs the same deletion with the same bearer token and returns
+      <code>{{"deleted": true, "session_id": ...}}</code>. The theater's
+      <em>Manage videos</em> mode uses this endpoint.</p>
     </div>
     <div class="tool card"><h3><code>act_batch(session_id, steps)</code></h3>
       <p>Run up to 20 actions in one call. Each step is
@@ -1771,22 +1866,8 @@ async def prune(
     )
 
 
-@mcp.tool()
-async def delete_session(
-    session_id: str, confirm: bool = False, force: bool = False
-) -> dict:
-    """Delete one finished session after explicit confirmation.
-
-    With ``force=True`` a stale active session (for example one orphaned by
-    a server restart) is also removed: any live browser runtime is aborted
-    first, then media and metadata are deleted.
-    """
-    if not confirm:
-        return {
-            "deleted": False,
-            "session_id": session_id,
-            "reason": "confirmation_required",
-        }
+async def perform_session_delete(session_id: str, force: bool = False) -> dict:
+    """Abort any live runtime when forced, then remove media and metadata."""
     session_id = session_id.strip()
     live = sessions.get(session_id)
     if live is not None:
@@ -1803,6 +1884,67 @@ async def delete_session(
         sessions.pop(session_id, None)
     return await asyncio.to_thread(
         retention.delete_session_storage, session_id, force
+    )
+
+
+@mcp.tool()
+async def delete_session(
+    session_id: str, confirm: bool = False, force: bool = False
+) -> dict:
+    """Delete one finished session after explicit confirmation.
+
+    With ``force=True`` a stale active session (for example one orphaned by
+    a server restart) is also removed: any live browser runtime is aborted
+    first, then media and metadata are deleted.
+    """
+    if not confirm:
+        return {
+            "deleted": False,
+            "session_id": session_id,
+            "reason": "confirmation_required",
+        }
+    return await perform_session_delete(session_id, force)
+
+
+@mcp.custom_route(
+    "/api/videos/{session_id}", methods=["DELETE"], include_in_schema=False
+)
+async def api_delete_video(request: Request) -> Response:
+    """Delete one finished session over HTTP (used by the theater UI).
+
+    Protected by the same bearer token as MCP. Requires ``confirm=true``;
+    ``force=true`` additionally removes a stale active session.
+    """
+    session_id = request.path_params["session_id"]
+    if not re.fullmatch(r"[0-9a-f]+", session_id):
+        return JSONResponse(
+            {"deleted": False, "session_id": session_id, "reason": "not_found"},
+            status_code=404,
+        )
+
+    def flag(name: str) -> bool:
+        return request.query_params.get(name, "").strip().lower() in {
+            "1", "true", "yes",
+        }
+
+    if not flag("confirm"):
+        return JSONResponse(
+            {
+                "deleted": False,
+                "session_id": session_id,
+                "reason": "confirmation_required",
+            },
+            status_code=400,
+        )
+    result = await perform_session_delete(session_id, flag("force"))
+    if result.get("deleted"):
+        return JSONResponse(result, status_code=200)
+    status_map = {
+        "not_found": 404,
+        "active_session_requires_force": 409,
+    }
+    return JSONResponse(
+        result, status_code=status_map.get(result.get("reason"), 400)
     )
 
 
