@@ -246,3 +246,14 @@ def test_the_director_prompt_covers_masks_shared_names_and_captions(mods):
     text = server.director()
     for must in ("mask=", "same_name", "submits_form", "caption", "wide, medium or", "update_step_narration"):
         assert must in text
+
+
+def test_the_screen_is_one_pixel_larger_than_the_recording_and_the_browser_fullscreen():
+    # Measured: a fullscreen window under Xvfb comes out one pixel short each
+    # way, so a screen of W+1 x H+1 gives a page of exactly W x H, recorded from
+    # the top-left. --kiosk did nothing in a new context and left the tab bar.
+    from reel_studio.engine import screen_geometry
+    g = screen_geometry(1920, 1080)
+    assert g["screen"] == "1921x1081x24"
+    assert "--start-fullscreen" in g["browser_args"] and "--window-size=1921,1081" in g["browser_args"]
+    assert not any("kiosk" in arg for arg in g["browser_args"])

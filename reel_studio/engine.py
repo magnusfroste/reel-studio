@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 import asyncio
 import json
+import tempfile
+import shutil
 import os
 from pathlib import Path
 import subprocess
@@ -132,6 +134,35 @@ _COLLECT_ELEMENTS_JS = (
 }"""
 )
 
+
+FULLSCREEN_NOTICE_SECONDS = 6.0
+
+
+def screen_geometry(width: int, height: int) -> dict:
+    """The X screen and browser window that make a recording show only the page.
+
+    The browser was launched with --kiosk, then given a new context — and a new
+    context opens an ordinary window. With no window manager under Xvfb, kiosk
+    never took effect: every recording showed Chrome's tab and address bars,
+    and the window grew past the screen, so the bottom ~85 pixels of each page —
+    captions included — were never in the video (found 2026-10-08, when an
+    agent's captions came out as a 2-pixel sliver).
+
+    A persistent context started with --start-fullscreen does fill the screen,
+    but one pixel short each way. So the X screen is one pixel larger than the
+    recording, and the recorder grabs exactly width x height from the top-left:
+    measured at 1920x1080, 1280x720 and 1080x1350, the page covers the recorded
+    frame edge to edge, with no browser chrome.
+    """
+    return {
+        "screen": f"{width + 1}x{height + 1}x24",
+        "browser_args": [
+            f"--window-size={width + 1},{height + 1}",
+            "--window-position=0,0",
+            "--start-fullscreen",
+        ],
+    }
+
 def output_root() -> Path:
     return Path(os.environ.get("REEL_OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR))).expanduser()
 
@@ -169,6 +200,8 @@ class BrowserSession:
     runtime_closed: bool = False
     # Monotonic time of the last tool call on this session; see touch().
     last_activity: float = 0.0
+    # The browser profile made for this session; removed when it closes.
+    profile_dir: Path | None = None
     annotation_counter: int = 0
 
     @classmethod
@@ -189,8 +222,9 @@ class BrowserSession:
         directory.mkdir(parents=True, exist_ok=True)
         display_number = _free_display()
         display = f":{display_number}"
+        geometry = screen_geometry(width, height)
         xvfb = subprocess.Popen(
-            ["Xvfb", display, "-screen", "0", f"{width}x{height}x24", "-ac"],
+            ["Xvfb", display, "-screen", "0", geometry["screen"], "-ac"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         for _ in range(50):
@@ -202,12 +236,20 @@ class BrowserSession:
             raise RuntimeError("Xvfb did not start")
 
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(
+        # A fresh profile per session: no cookie or login carries from one
+        # recording to the next. Removed again in _close_runtime.
+        profile_dir = Path(tempfile.mkdtemp(prefix="reel-profile-"))
+        launched_at = time.monotonic()
+        context = await playwright.chromium.launch_persistent_context(
+            str(profile_dir),
             headless=False,
             env={**os.environ, "DISPLAY": display},
-            args=[f"--window-size={width},{height}", "--window-position=0,0", "--kiosk"],
+            args=geometry["browser_args"],
+            no_viewport=True,
         )
-        context = await browser.new_context(viewport={"width": width, "height": height})
+        # A persistent context has no separate Browser; closing the context
+        # closes the browser, which is what _close_runtime needs.
+        browser = context
         if mask_css:
             # Applied by the browser before any page script runs, on every page
             # and frame, so a masked element is blurred from its first frame —
@@ -220,9 +262,16 @@ class BrowserSession:
                 " if (document.documentElement) add();"
                 " else document.addEventListener('DOMContentLoaded', add); })()"
             )
-        page = await context.new_page()
+        page = context.pages[0] if context.pages else await context.new_page()
         await page.goto(start_url, wait_until="domcontentloaded")
         await page.wait_for_timeout(500)
+        # Entering fullscreen, Chrome shows "To exit full screen, press and hold
+        # Esc" over the top of the page for about five seconds (measured: gone
+        # by 5.6 s, and it does not return on navigation or with the pointer at
+        # the top edge). Recording starts after it.
+        settle = FULLSCREEN_NOTICE_SECONDS - (time.monotonic() - launched_at)
+        if settle > 0:
+            await asyncio.sleep(settle)
         recorder = start_recording(display, width, height, directory / "screen.mp4")
         # Give ffmpeg one frame before t0 is recorded.
         await asyncio.sleep(0.4)
@@ -241,14 +290,17 @@ class BrowserSession:
                 xvfb.wait(timeout=5)
             except Exception:
                 pass
+            shutil.rmtree(profile_dir, ignore_errors=True)
             raise RuntimeError(
                 f"Screen recorder exited during startup (exit code {exit_code})"
             )
-        return cls(
+        session = cls(
             session_id, start_url, width, height, voice, provider, output_size,
             render_config or RenderConfig(), directory, display_number, xvfb,
             playwright, browser, context, page, recorder, time.monotonic(),
         )
+        session.profile_dir = profile_dir
+        return session
 
     async def capture_screenshot(self) -> Path:
         screenshot = self.directory / f"screenshot-{int(time.time() * 1000)}.jpg"
@@ -842,4 +894,6 @@ class BrowserSession:
                 self.xvfb.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.xvfb.kill()
+            if self.profile_dir is not None:
+                shutil.rmtree(self.profile_dir, ignore_errors=True)
             self.runtime_closed = True
