@@ -273,7 +273,6 @@ class BrowserSession:
         # recording to the next. Removed again in _close_runtime.
         profile_dir = Path(tempfile.mkdtemp(prefix="reel-profile-"))
         write_quiet_profile(profile_dir)
-        launched_at = time.monotonic()
         context = await playwright.chromium.launch_persistent_context(
             str(profile_dir),
             headless=False,
@@ -302,10 +301,10 @@ class BrowserSession:
         # Entering fullscreen, Chrome shows "To exit full screen, press and hold
         # Esc" over the top of the page for about five seconds (measured: gone
         # by 5.6 s, and it does not return on navigation or with the pointer at
-        # the top edge). Recording starts after it.
-        settle = FULLSCREEN_NOTICE_SECONDS - (time.monotonic() - launched_at)
-        if settle > 0:
-            await asyncio.sleep(settle)
+        # the top edge). It is timed from the first page shown, not from launch:
+        # counted from launch, a slow first page left it in the first seconds
+        # of an agent's video. Recording starts after it.
+        await asyncio.sleep(FULLSCREEN_NOTICE_SECONDS)
         recorder = start_recording(display, width, height, directory / "screen.mp4")
         # Give ffmpeg one frame before t0 is recorded.
         await asyncio.sleep(0.4)
@@ -782,7 +781,11 @@ class BrowserSession:
             if action.wait_for_text:
                 deadline = time.monotonic() + 8.0
                 while time.monotonic() < deadline:
-                    if await self._visible_text_target(action.wait_for_text, exact=True):
+                    # Contained text, not the element's whole text: "The model
+                    # answered" never matched "✓ The model answered in 17.4s.
+                    # Chat will work.", so a test that passed read as a
+                    # failure and cancelled the rest of the batch (2026-10-08).
+                    if await self._visible_text_target(action.wait_for_text, exact=False):
                         settled_by["visible_text"] = action.wait_for_text
                         break
                     await self.page.wait_for_timeout(100)
