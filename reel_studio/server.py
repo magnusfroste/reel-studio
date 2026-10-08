@@ -2015,13 +2015,21 @@ async def finish(session_id: str) -> dict:
             },
         }
     stored = store.get_session(session_id)
-    if not (stored or {}).get("steps"):
-        # Rendering nothing is not a result. Say so, and leave the session
-        # running so it can still be recorded — or discarded on purpose.
+    steps = (stored or {}).get("steps") or []
+    if not any(step.get("ok") for step in steps):
+        # Rendering nothing is not a result, and neither is a take in which
+        # every step failed: an invalid action is stored as a step too, so
+        # counting steps alone let a session of nothing but errors render
+        # (found verifying #25 live). Say so, and leave the session running so
+        # it can still be recorded — or discarded on purpose.
         return {
             "ok": False,
-            "error": {"type": "empty_session", "message": "No steps were recorded in this session."},
-            "hint": "Record at least one act, or discard the session with delete_session(confirm=True, force=True).",
+            "error": {
+                "type": "empty_session",
+                "message": "No steps were recorded in this session." if not steps
+                else f"None of the {len(steps)} recorded steps succeeded.",
+            },
+            "hint": "Record at least one successful act, or discard the session with delete_session(confirm=True, force=True).",
         }
     pending = pending_shots(stored)
     if pending:

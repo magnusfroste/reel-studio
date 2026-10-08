@@ -173,3 +173,26 @@ def test_review_flags_a_mostly_silent_take(mods):
     review = asyncio.run(server.review_session("s-quiet"))
     coverage = [f for f in review["findings"] if f["category"] == "narration_coverage"]
     assert coverage and "4 of 5" in coverage[0]["message"]
+
+
+def test_finish_refuses_a_take_where_every_step_failed(mods):
+    server, store, _ = mods
+    _new_session(store, "s-failed")
+    server.sessions["s-failed"] = FakeSession()
+    store.append_step("s-failed", "fill", "x", "https://example.com", "t", "", 0, 0.0, None, False,
+                      "invalid_action", "en-US-JennyNeural")
+    result = asyncio.run(server.finish("s-failed"))
+    assert result["error"]["type"] == "empty_session"
+    assert "None of the 1 recorded steps succeeded" in result["error"]["message"]
+    assert "s-failed" in server.sessions
+
+
+def test_one_successful_step_is_enough_to_render(mods):
+    server, store, _ = mods
+    _new_session(store, "s-one-ok")
+    server.sessions["s-one-ok"] = FakeSession()
+    store.append_step("s-one-ok", "wait", None, "https://example.com", "t", "Hello.", 0, 0.0, None, True,
+                      None, "en-US-JennyNeural")
+    result = asyncio.run(server.finish("s-one-ok"))
+    # A stand-in session cannot render; what matters is that it got past the check.
+    assert result.get("error", {}).get("type") != "empty_session"
