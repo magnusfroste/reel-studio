@@ -31,6 +31,7 @@ from .render import (
     start_recording,
     stop_recording,
 )
+from .camera import EASE_SECONDS, FRAMING_ZOOM, Camera, capture_scale
 from .annotations import (
     annotation_hold_seconds,
     annotation_id,
@@ -170,7 +171,7 @@ def write_quiet_profile(profile_dir: Path) -> None:
 FULLSCREEN_NOTICE_SECONDS = 6.0
 
 
-def screen_geometry(width: int, height: int) -> dict:
+def screen_geometry(width: int, height: int, scale: float = 1.0) -> dict:
     """The X screen and browser window that make a recording show only the page.
 
     The browser was launched with --kiosk, then given a new context — and a new
@@ -185,11 +186,26 @@ def screen_geometry(width: int, height: int) -> dict:
     recording, and the recorder grabs exactly width x height from the top-left:
     measured at 1920x1080, 1280x720 and 1080x1350, the page covers the recorded
     frame edge to edge, with no browser chrome.
+
+    With a device scale factor (hi-res capture for the camera), the X screen
+    and the recording are in physical pixels while --window-size is in CSS
+    pixels: width x height gives a viewport of exactly width x height CSS
+    pixels filling the physical frame (measured at 1920x1080 and 4/3; one
+    pixel more made the page two CSS pixels too large and clipped its edges).
     """
+    physical_w, physical_h = round(width * scale), round(height * scale)
+    if scale == 1.0:
+        window = [f"--window-size={width + 1},{height + 1}"]
+    else:
+        window = [
+            f"--window-size={width},{height}",
+            f"--force-device-scale-factor={scale:.10g}",
+        ]
     return {
-        "screen": f"{width + 1}x{height + 1}x24",
+        "screen": f"{physical_w + 1}x{physical_h + 1}x24",
+        "record_size": (physical_w, physical_h),
         "browser_args": [
-            f"--window-size={width + 1},{height + 1}",
+            *window,
             "--window-position=0,0",
             "--start-fullscreen",
             *QUIET_FLAGS,
@@ -236,6 +252,10 @@ class BrowserSession:
     # The browser profile made for this session; removed when it closes.
     profile_dir: Path | None = None
     annotation_counter: int = 0
+    camera: Camera | None = None
+    # A shot declared by begin_shot; the camera moves when its first step
+    # starts, since the time between tool calls is cut from the video.
+    pending_shot: tuple[float, float | None, float | None] | None = None
 
     @classmethod
     async def create(
@@ -255,7 +275,8 @@ class BrowserSession:
         directory.mkdir(parents=True, exist_ok=True)
         display_number = _free_display()
         display = f":{display_number}"
-        geometry = screen_geometry(width, height)
+        scale = capture_scale(width, height)
+        geometry = screen_geometry(width, height, scale)
         xvfb = subprocess.Popen(
             ["Xvfb", display, "-screen", "0", geometry["screen"], "-ac"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -305,7 +326,9 @@ class BrowserSession:
         # counted from launch, a slow first page left it in the first seconds
         # of an agent's video. Recording starts after it.
         await asyncio.sleep(FULLSCREEN_NOTICE_SECONDS)
-        recorder = start_recording(display, width, height, directory / "screen.mp4")
+        recorder = start_recording(
+            display, *geometry["record_size"], directory / "screen.mp4"
+        )
         # Give ffmpeg one frame before t0 is recorded.
         await asyncio.sleep(0.4)
         if recorder.poll() is not None:
@@ -333,11 +356,16 @@ class BrowserSession:
             playwright, browser, context, page, recorder, time.monotonic(),
         )
         session.profile_dir = profile_dir
+        session.camera = Camera(width, height, scale)
         return session
 
     async def capture_screenshot(self) -> Path:
         screenshot = self.directory / f"screenshot-{int(time.time() * 1000)}.jpg"
-        await self.page.screenshot(path=str(screenshot), type="jpeg", quality=80)
+        # CSS-sized, whatever the capture density: boxes and refs an agent
+        # reads off a screenshot are in CSS pixels.
+        await self.page.screenshot(
+            path=str(screenshot), type="jpeg", quality=80, scale="css"
+        )
         return screenshot
 
     async def _stable_selector(self, item: Locator) -> str:
@@ -535,6 +563,75 @@ class BrowserSession:
             and box["y"] + box["height"] > 0
         )
 
+    async def set_shot(
+        self,
+        framing: str,
+        zoom: float | None = None,
+        focus_ref: str | None = None,
+        focus_text: str | None = None,
+    ) -> dict:
+        """Aim the camera for the next step: framing, or an explicit zoom, on a focus.
+
+        The move starts with the next recorded step, so the push-in lands
+        while that step's narration names the thing it frames.
+        """
+        level = zoom if zoom is not None else FRAMING_ZOOM.get(framing, 1.0)
+        level = max(1.0, level)
+        box = None
+        note = ""
+        if level > 1.0:
+            if focus_ref and focus_ref in self.refs and not self.refs_stale:
+                target = self.page.locator(self.refs[focus_ref]).first
+                try:
+                    box = await target.bounding_box()
+                except PlaywrightError:
+                    box = None
+            elif focus_text:
+                target = await self._visible_text_target(focus_text, exact=False)
+                if target is not None:
+                    box = await target.bounding_box()
+            if box is None:
+                note = (
+                    "No focus_ref or focus_text box on screen: the camera pushes in "
+                    "on the current centre and follows the next clicked element."
+                )
+        cx = cy = None
+        if box:
+            cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        self.pending_shot = (level, cx, cy)
+        result: dict = {"camera_zoom": level}
+        if box:
+            result["camera_centre"] = {"x": round(cx or 0), "y": round(cy or 0)}
+        if note:
+            result["camera_note"] = note
+        return result
+
+    def _camera_now(self) -> float:
+        return time.monotonic() - self.t0
+
+    async def _follow(self, target: Locator) -> None:
+        """Pan to a target that is outside the zoomed view, before acting on it."""
+        if self.camera is None:
+            return
+        try:
+            box = await target.bounding_box()
+        except PlaywrightError:
+            return
+        centre = self.camera.needs_follow(box)
+        if centre is None:
+            return
+        zoom = self.camera.final_state()[0]
+        if self.camera.move(self._camera_now(), zoom, *centre):
+            # Let the pan land before the click, so the viewer sees where it
+            # goes before it happens.
+            await asyncio.sleep(EASE_SECONDS)
+
+    def _caption_view(self) -> dict | None:
+        if self.camera is None:
+            return None
+        view = self.camera.view()
+        return view if view["zoom"] > 1.0 else None
+
     async def assert_visible(self, text: str) -> dict:
         target = await self._visible_text_target(text)
         if target is None:
@@ -578,6 +675,9 @@ class BrowserSession:
                 "stale_refs",
                 "Element refs are stale; call observe again before using a ref.",
             )
+        if self.pending_shot is not None and self.camera is not None:
+            self.camera.move(offset, *self.pending_shot)
+            self.pending_shot = None
         if narration:
             try:
                 clip = await synthesize(
@@ -600,7 +700,8 @@ class BrowserSession:
                 annotation_duration = duration_ms / 1000
                 await self.page.evaluate(
                     caption_script(),
-                    {"id": live_annotation_id, "label": label, "duration_ms": duration_ms},
+                    {"id": live_annotation_id, "label": label, "duration_ms": duration_ms,
+                     "view": self._caption_view()},
                 )
             elif action_type == "goto":
                 if not action.url:
@@ -651,6 +752,7 @@ class BrowserSession:
                     )
                 await target.wait_for(state="visible", timeout=5000)
                 await target.scroll_into_view_if_needed(timeout=5000)
+                await self._follow(target)
                 box = await target.bounding_box()
                 if not box:
                     return await self.error_result(
@@ -702,6 +804,8 @@ class BrowserSession:
                         )
                 await target.wait_for(state="visible", timeout=5000)
                 await target.scroll_into_view_if_needed(timeout=5000)
+                if action_type not in {"mask", "unmask"}:
+                    await self._follow(target)
                 if action_type in {"click", "click_and_wait"}:
                     await self._inject_spotlight(target)
                     await target.click()
@@ -763,6 +867,9 @@ class BrowserSession:
             action_finished_at = time.monotonic() - self.t0
             if self.page.url != before_url:
                 self.refs_stale = True
+                # A new page: whatever the camera framed is gone. Back to wide.
+                if self.camera is not None:
+                    self.camera.move(action_finished_at, 1.0)
             try:
                 await self.page.wait_for_load_state("domcontentloaded", timeout=2000)
             except PlaywrightTimeoutError:
@@ -882,10 +989,12 @@ class BrowserSession:
                 f"Recording is unreadable: {video} (size={size} bytes): {exc}"
             ) from exc
         final = self.directory / "video.mp4"
+        if self.camera is not None:
+            self.camera.save(self.directory)
         if segmented_render_enabled():
             segmented_render(
                 video, self.timeline, final, self.output_size,
-                self.render_config,
+                self.render_config, self.camera,
             )
         else:
             mux_narration(
@@ -894,6 +1003,7 @@ class BrowserSession:
                 final,
                 self.output_size,
                 self.render_config,
+                self.camera,
             )
         if not final.is_file() or final.stat().st_size == 0:
             raise RuntimeError("FFmpeg did not produce a playable video")

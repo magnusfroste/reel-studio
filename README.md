@@ -167,14 +167,27 @@ destination state before starting narration; `settle_ms` adds a final layout
 stability pause. Use `target_text` to disambiguate a child module from a parent
 sidebar section. `annotate` follows its target through scroll, resize, and
 layout changes and holds for the longer of annotation and narration duration.
-`set_zoom` changes the page zoom between `0.5` and `2.0` for director-led
-establishing, focus, and return-to-context shots.
+`set_zoom` changes the page's CSS zoom (it reflows the page) between `0.5`
+and `2.0`; for a camera move use `begin_shot` instead.
 `annotate` adds a persistent in-video callout, marker, or underline to an
 observed target for the requested duration; use `dim=true` to reduce competing
 visual noise while the narration explains the target.
 The director can declare and verify shots with `begin_shot` and `verify_shot`.
 Shots record framing (`wide`, `medium`, `close`), zoom, focus target, teaching
 intent, and whether the visual result matched the narration.
+
+**Shots move the camera.** `medium` pushes in to 1.5x and `close` to 2x on the
+shot's `focus_ref` or `focus_text` (an explicit `zoom` from 1 to 2.5 overrides
+the framing); `wide` pulls back to the full page. The move starts with the
+shot's first step and eases over a second, so the push-in lands while that
+step's narration names what it frames. While pushed in, the camera pans to any
+element a step clicks or types into that is outside the frame, captions are
+drawn inside the framed region at their normal size, and a new page returns
+the camera to wide. The browser is recorded at a higher pixel density than its
+layout (2560x1440 for a 1920x1080 page; `REEL_CAPTURE_SCALE=1` turns it off),
+so text stays sharp at the closest framing; the final video and screenshots
+are at the CSS size. Moves are rendered in post and kept in `camera.json`, so
+`rerender` reproduces them.
 When shots exist, `finish` acts as a quality gate and refuses to publish until
 every shot is explicitly verified. If a live focus text is missing,
 `verify_shot` records `needs_review` automatically.

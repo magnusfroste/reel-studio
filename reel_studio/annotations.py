@@ -167,6 +167,19 @@ def caption_script() -> str:
     boxShadow: "0 8px 28px rgba(0,0,0,.42)",
     letterSpacing: ".01em"
   });
+  if (spec.view) {
+    // The camera is pushed in: draw the caption inside the framed region,
+    // scaled by 1/zoom, so it comes out the same size and in the same place
+    // in the video as an unzoomed caption.
+    const v = spec.view;
+    Object.assign(caption.style, {
+      left: `${v.x + v.w / 2}px`,
+      bottom: `${window.innerHeight - (v.y + v.h) + 34 / v.zoom}px`,
+      transform: `translateX(-50%) scale(${1 / v.zoom})`,
+      transformOrigin: "50% 100%",
+      maxWidth: `${Math.min(900, v.w * v.zoom - 64)}px`
+    });
+  }
   group.appendChild(caption);
   root.appendChild(group);
   setTimeout(() => group.remove(), spec.duration_ms);

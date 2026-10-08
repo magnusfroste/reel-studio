@@ -6,8 +6,11 @@ from pathlib import Path
 import signal
 import subprocess
 import tempfile
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 import textwrap
+
+if TYPE_CHECKING:
+    from .camera import Camera
 
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -73,9 +76,12 @@ def mux_narration(
     output_path: Path,
     output_size: tuple[int, int] | None = None,
     config: RenderConfig | None = None,
+    camera: "Camera | None" = None,
 ) -> Path:
     """Create a delayed mixed narration track and mux it into the video."""
     config = config or RenderConfig()
+    if camera is not None:
+        output_size = camera.output_size(output_size)
     if not clips and not _has_branding(config) and config.music == "none":
         if output_size is None:
             video_path.replace(output_path)
@@ -330,9 +336,12 @@ def segmented_render(
     output_path: Path,
     output_size: tuple[int, int] | None = None,
     config: RenderConfig | None = None,
+    camera: "Camera | None" = None,
 ) -> SegmentedRenderResult:
     """Render kept step windows from the original continuous recording."""
     config = config or RenderConfig()
+    if camera is not None:
+        output_size = camera.output_size(output_size)
     video_duration = probe_duration(video_path)
     ordered = sorted(
         (offset, clip, max(0.0, duration))
@@ -355,7 +364,7 @@ def segmented_render(
                 _render_video_segment(
                     video_path, 0.0, lead, lead,
                     temporary_path / "segment-lead.mp4",
-                    output_size,
+                    output_size, camera,
                 )
             )
             cumulative += lead
@@ -387,6 +396,7 @@ def segmented_render(
                     keep_duration,
                     segment_path,
                     output_size,
+                    camera,
                 )
             )
             if clip is not None:
@@ -398,7 +408,7 @@ def segmented_render(
                 _render_video_segment(
                     video_path, 0.0, video_duration, video_duration,
                     temporary_path / "segment-full.mp4",
-                    output_size,
+                    output_size, camera,
                 )
             )
             cumulative = video_duration
@@ -433,18 +443,30 @@ def _render_video_segment(
     output_duration: float,
     output_path: Path,
     output_size: tuple[int, int] | None = None,
+    camera: "Camera | None" = None,
 ) -> Path:
+    # -t is an input option here. After -i it capped the output instead, and
+    # cut off the frozen frames tpad adds when narration outlasts the footage
+    # — the segment came out short and every later line drifted late.
     command = [
         "ffmpeg", "-loglevel", "error", "-y",
-        "-ss", f"{offset:.3f}", "-i", str(video_path),
-        "-t", f"{source_duration:.3f}",
+        "-ss", f"{offset:.3f}", "-t", f"{source_duration:.3f}",
+        "-i", str(video_path),
     ]
     extension = output_duration - source_duration
     if extension > 0.01:
         filters = [f"tpad=stop_mode=clone:stop_duration={extension:.3f}"]
     else:
         filters = []
-    if output_size is not None:
+    camera_filter = None
+    if camera is not None:
+        size = output_size or camera.physical_size
+        camera_filter = camera.zoompan(offset, offset + source_duration, size)
+    if camera_filter:
+        # After tpad, so a move keeps easing over a held frame; zoompan
+        # crops and scales to the output size in one pass.
+        filters.append(camera_filter)
+    elif output_size is not None:
         filters.append(f"scale={output_size[0]}:{output_size[1]}")
     if filters:
         command.extend(["-vf", ",".join(filters)])
@@ -462,9 +484,16 @@ def rerender_narration(
     output_path: Path,
     output_size: tuple[int, int] | None = None,
     config: RenderConfig | None = None,
+    camera: "Camera | None" = None,
 ) -> Path:
-    """Replace a video's audio with delayed narration, extending its last frame if needed."""
+    """Replace a video's audio with delayed narration, extending its last frame if needed.
+
+    Camera moves are rendered only by segmented_render; here a hi-res
+    recording is just scaled down to its CSS size.
+    """
     config = config or RenderConfig()
+    if camera is not None:
+        output_size = camera.output_size(output_size)
     video_duration = probe_duration(video_path)
     temp_path = output_path.with_name(f".{output_path.stem}.rerender.mp4")
     if not clips:
