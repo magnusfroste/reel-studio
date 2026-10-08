@@ -1,6 +1,8 @@
 """FastMCP entry point for Reel Studio."""
 
 import asyncio
+import time
+from typing import Annotated, Any, Literal
 import hmac
 import html
 import json
@@ -15,7 +17,7 @@ from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 import uvicorn
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -33,7 +35,7 @@ from .render import (
     segmented_render,
     segmented_render_enabled,
 )
-from .schema import Action
+from .schema import ACTION_CONTRACT, ACTION_TYPES, Action, action_json_schema
 from .tts import TTSProviderError, normalize_provider, synthesize, validate_provider
 
 
@@ -662,13 +664,16 @@ def watch_page(session_id: str, base_url: str = "/") -> str | None:
         except (TypeError, ValueError):
             offset_seconds = 0.0
         offset = f"{offset_seconds:.1f}s"
+        # Outside the f-string: a backslash inside an f-string expression is a
+        # SyntaxError before Python 3.12, and CI runs 3.10.
+        narration_html = html.escape(narration) if narration else '<span class="muted">(No narration)</span>'
         step_items.append(
             f"""<li style="margin-bottom:12px; padding:10px; background:#1b2130; border-radius:8px;">
                 <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
                     <strong style="color:#8ea7ff;">Step {idx}: {html.escape(action_type)} {html.escape(target)}</strong>
                     <span class="muted">{offset}</span>
                 </div>
-                <p style="margin:0; font-size:0.95rem; color:#dbe2ff;">{html.escape(narration) if narration else '<span class=\"muted\">(No narration)</span>'}</p>
+                <p style="margin:0; font-size:0.95rem; color:#dbe2ff;">{narration_html}</p>
             </li>"""
         )
     steps_html = "".join(step_items) if step_items else '<li class="muted">No step breakdown recorded.</li>'
@@ -1184,6 +1189,98 @@ async def bug_reports_api(request: Request) -> Response:
     return JSONResponse(store.list_backlog(category="bug"))
 
 
+# Sessions nobody is directing any more.
+#
+# A session records from start_session until finish. An agent that gave up on
+# a take and started another left the first one recording — browser, X display
+# and a 1080p encoder each — and on 2026-10-07 five of them ran at once on one
+# CPU core, which is why every observe took tens of seconds. A session with no
+# tool call for REEL_IDLE_TIMEOUT_SECONDS (default 900, 0 disables) is aborted:
+# recording stops, its media stays on disk, and it is marked as ended without a
+# video. Checked once a minute.
+def idle_timeout_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("REEL_IDLE_TIMEOUT_SECONDS", "900")))
+    except ValueError:
+        return 900.0
+
+
+def idle_session_ids(live: dict, now: float, timeout: float) -> list[str]:
+    """Ids of live sessions untouched for longer than timeout (0 = never)."""
+    if timeout <= 0:
+        return []
+    return [
+        session_id for session_id, session in live.items()
+        if now - (getattr(session, "last_activity", 0.0) or getattr(session, "t0", now)) > timeout
+    ]
+
+
+async def reap_idle_sessions(now: float | None = None) -> list[str]:
+    reaped = []
+    for session_id in idle_session_ids(sessions, time.monotonic() if now is None else now, idle_timeout_seconds()):
+        session = sessions.pop(session_id, None)
+        if session is None:
+            continue
+        try:
+            await session.abort()
+        except Exception:
+            pass
+        store.mark_session_error(session_id)
+        reaped.append(session_id)
+        print(f"[reel-studio] stopped idle session {session_id}: no tool call for {idle_timeout_seconds():.0f}s", flush=True)
+    return reaped
+
+
+_reaper_task: asyncio.Task | None = None
+
+
+def ensure_idle_reaper() -> None:
+    """Start the once-a-minute idle check, the first time a session starts."""
+    global _reaper_task
+    if _reaper_task is not None and not _reaper_task.done():
+        return
+
+    async def loop() -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await reap_idle_sessions()
+            except Exception as exc:  # never let the reaper die
+                print(f"[reel-studio] idle check failed: {exc}", flush=True)
+
+    _reaper_task = asyncio.create_task(loop())
+
+
+def _touch(session_id: str) -> None:
+    session = sessions.get(session_id)
+    if session is not None and hasattr(session, "touch"):
+        session.touch()
+
+
+DIRECTOR_PROMPT = """You are directing a narrated screen recording with reel-studio.
+The screen records from start_session until finish, so plan first and record once.
+
+1. Before start_session: find your way around the site with your own browser
+   tools, and write the script: the beats, and one or two sentences of narration
+   per beat. Note what you need on the way: sign-in, cookie banner, inputs.
+2. One session at a time. Every session you start ends with finish, even a
+   failed probe; discard probes with delete_session(confirm=True, force=True).
+3. """ + ACTION_CONTRACT + """
+4. Use act_batch for each beat (up to 20 steps): one round trip, not one per click.
+5. observe once per page and reuse its refs; observe(detail="refs") when you only
+   need refs. Observe again after the URL changes or an action reports stale_refs.
+6. Narrate every step a viewer sees. Steps without narration are silent.
+7. begin_shot before a beat and verify_shot after it; finish refuses to publish
+   while a shot is unverified.
+8. Run review_session, fix what it reports, then call finish once.
+"""
+
+
+@mcp.prompt(name="director", description="How to direct a narrated recording with reel-studio, start to finish")
+def director() -> str:
+    return DIRECTOR_PROMPT
+
+
 @mcp.tool()
 async def start_session(
     start_url: str, width: int = 1920, height: int = 1080,
@@ -1197,7 +1294,20 @@ async def start_session(
     cta_text: str = "Learn more",
     music: str = "none",
 ) -> dict:
-    """Launch a headed browser and begin recording."""
+    """Launch a headed browser and begin recording.
+
+    Recording starts now and runs until finish, so plan the script and find
+    your way around the site before calling this. Defaults: 1920x1080 capture
+    (output_size, e.g. "1280x720", downscales only the final MP4); voice
+    en-US-JennyNeural on the free Edge provider (provider "elevenlabs" needs
+    ELEVENLABS_API_KEY and takes a voice id); no music ("subtle" adds a quiet
+    bed); title/subtitle add a 3-second intro card, cta_url/cta_text an outro.
+
+    One session at a time: every session you start must end with finish, or
+    it keeps recording until it has been idle for REEL_IDLE_TIMEOUT_SECONDS.
+    The response lists other sessions that are still recording. See the
+    "director" prompt for the whole workflow.
+    """
     try:
         selected_provider = normalize_provider(provider)
         validate_provider(selected_provider)
@@ -1220,7 +1330,10 @@ async def start_session(
         start_url, width, height, voice, selected_provider, selected_output_size,
         render_config,
     )
+    session.touch()
+    others = [other for other in sessions if other != session.session_id]
     sessions[session.session_id] = session
+    ensure_idle_reaper()
     store.create_session(
         session.session_id,
         start_url,
@@ -1237,14 +1350,72 @@ async def start_session(
         render_config.cta_text,
         render_config.music,
     )
-    return {"session_id": session.session_id}
+    result: dict = {"session_id": session.session_id}
+    if others:
+        result["active_sessions"] = others
+        result["warning"] = (
+            f"{len(others)} other session(s) are still recording: {', '.join(others)}. "
+            "Finish them, or delete_session(confirm=True, force=True) to discard them; "
+            "each one costs a browser and a video encoder."
+        )
+    return result
+
+
+def observe_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(os.environ.get("REEL_OBSERVE_TIMEOUT_SECONDS", "60")))
+    except ValueError:
+        return 60.0
 
 
 @mcp.tool()
-async def observe(session_id: str) -> CallToolResult:
-    """Capture the current browser UI and its interactive elements."""
-    payload, screenshot = await sessions[session_id].observe()
+async def observe(
+    session_id: str,
+    detail: Annotated[
+        Literal["full", "refs"],
+        Field(description='"full": screenshot, page text and element boxes. "refs": only ref, role and text per element — much smaller and faster; use it when you only need refs to act.'),
+    ] = "full",
+) -> CallToolResult:
+    """Capture the current browser UI and its interactive elements.
+
+    Refs stay valid until the URL changes or an action reports stale_refs, so
+    observe once per page and reuse them.
+    """
+    session = sessions.get(session_id)
+    if session is None:
+        return feedback_result(_unknown_session(session_id))
+    session.touch()
+    try:
+        payload, screenshot = await asyncio.wait_for(
+            session.observe(detail), timeout=observe_timeout_seconds()
+        )
+    except asyncio.TimeoutError:
+        session.refs_stale = True
+        return feedback_result({
+            "ok": False,
+            "error": {
+                "type": "observe_timeout",
+                "message": f"observe did not finish within {observe_timeout_seconds():.0f}s",
+            },
+            "hint": 'Try observe(detail="refs"), which skips the screenshot and page text.',
+        })
     return feedback_result(payload, screenshot)
+
+
+def _unknown_session(session_id: str) -> dict:
+    """An unknown id, with the ids that do exist so the caller can recover."""
+    return {
+        "ok": False,
+        "error": {"type": "unknown_session", "message": f"Unknown session_id: {session_id}"},
+        "active_sessions": list(sessions),
+    }
+
+
+# Steps a viewer sees happen. Without narration they play in silence; the
+# finished take on 2026-10-07 was 44 seconds with one narrated step.
+SILENT_WARNING_TYPES = {"goto", "click", "click_and_wait", "type", "select_option", "press_key", "scroll_to_text"}
+
+ActionParam = Annotated[dict[str, Any], Field(json_schema_extra=action_json_schema())]
 
 
 async def _run_action(
@@ -1252,10 +1423,12 @@ async def _run_action(
 ) -> tuple[dict, object]:
     """Validate and perform one action, persisting its storyboard step."""
     session = sessions[session_id]
+    session.touch()
     try:
         parsed_action = Action.model_validate(action)
     except ValidationError as exc:
         payload, screenshot = await session.error_result("invalid_action", str(exc))
+        payload["hint"] = ACTION_CONTRACT
         store.append_step(
             session_id,
             action.get("type") if isinstance(action, dict) else None,
@@ -1272,6 +1445,15 @@ async def _run_action(
         )
         return payload, screenshot
     payload, screenshot = await session.act(parsed_action, narration)
+    error_type = (payload.get("error") or {}).get("type")
+    if error_type in {"unknown_ref", "stale_refs"}:
+        known = list(session.refs)
+        payload["hint"] = (
+            'Call observe (detail="refs" is fast) and use a ref from it.'
+            + (f" Refs from the last observe: {', '.join(known[:40])}" if known and error_type == "unknown_ref" else "")
+        )
+    elif payload.get("ok") and not narration.strip() and parsed_action.type in SILENT_WARNING_TYPES:
+        payload["warning"] = "No narration: this step will be silent in the final video."
     store.append_step(
         session_id,
         parsed_action.type,
@@ -1290,8 +1472,15 @@ async def _run_action(
 
 
 @mcp.tool()
-async def act(session_id: str, action: dict, narration: str = "") -> CallToolResult:
-    """Perform exactly one browser action, optionally narrating it."""
+async def act(session_id: str, action: ActionParam, narration: str = "") -> CallToolResult:
+    """Perform exactly one browser action, narrating it.
+
+    Narration is spoken over this step in the final video; a step without it
+    plays in silence. For a beat of several steps use act_batch instead: one
+    round trip instead of one per click.
+    """
+    if session_id not in sessions:
+        return feedback_result(_unknown_session(session_id))
     payload, screenshot = await _run_action(session_id, action, narration)
     return feedback_result(payload, screenshot)
 
@@ -1300,7 +1489,17 @@ MAX_BATCH_STEPS = 20
 
 
 @mcp.tool()
-async def act_batch(session_id: str, steps: list[dict]) -> CallToolResult:
+async def act_batch(
+    session_id: str,
+    steps: Annotated[
+        list[dict[str, Any]],
+        Field(json_schema_extra={"items": {
+            "type": "object",
+            "required": ["action"],
+            "properties": {"action": action_json_schema(), "narration": {"type": "string"}},
+        }}),
+    ],
+) -> CallToolResult:
     """Perform a sequence of browser actions in a single call.
 
     Each step is ``{"action": {...}, "narration": "..."}`` using the same
@@ -1310,9 +1509,7 @@ async def act_batch(session_id: str, steps: list[dict]) -> CallToolResult:
     result per executed step plus the screenshot of the last executed step.
     """
     if session_id not in sessions:
-        return feedback_result(
-            {"ok": False, "error": {"type": "unknown_session", "message": session_id}}
-        )
+        return feedback_result(_unknown_session(session_id))
     if not steps:
         return feedback_result(
             {"ok": False, "error": {"type": "invalid_batch", "message": "steps must be a non-empty list"}}
@@ -1350,6 +1547,7 @@ async def act_batch(session_id: str, steps: list[dict]) -> CallToolResult:
 @mcp.tool()
 async def assert_visible(session_id: str, text: str) -> dict:
     """Check for visible text without recording a storyboard step."""
+    _touch(session_id)
     session = sessions.get(session_id)
     if session is None:
         return {
@@ -1365,6 +1563,7 @@ async def assert_visible(session_id: str, text: str) -> dict:
 @mcp.tool()
 async def get_status(session_id: str) -> dict:
     """Return recording progress and an estimated final video length."""
+    _touch(session_id)
     session = sessions.get(session_id)
     if session is not None:
         return session.status()
@@ -1403,6 +1602,7 @@ async def begin_shot(
     focus_text: str | None = None,
 ) -> dict:
     """Declare a director storyboard shot before recording it."""
+    _touch(session_id)
     if store.get_session(session_id) is None:
         return {"ok": False, "error": {"type": "unknown_session", "message": session_id}}
     framing = framing.strip().lower()
@@ -1431,6 +1631,7 @@ async def verify_shot(
     verification_note: str = "",
 ) -> dict:
     """Record whether a storyboard shot met its teaching criterion."""
+    _touch(session_id)
     try:
         stored = store.get_shot(session_id, shot_id.strip())
         if stored is None:
@@ -1731,6 +1932,18 @@ async def review_session(session_id: str) -> dict:
                 "message": f"Visual emphasis action '{action_type}' on '{target}' has no accompanying narration",
             })
             
+    # 2b. Narration coverage. A take where most visible steps are silent
+    # plays as a screen recording with a voice that comes and goes.
+    visible = [step for step in steps if step.get("action_type") in SILENT_WARNING_TYPES and step.get("ok", True)]
+    silent = [step for step in visible if not (step.get("narration_text") or "").strip()]
+    if len(visible) >= 4 and len(silent) * 2 > len(visible):
+        findings.append({
+            "category": "narration_coverage",
+            "severity": "medium",
+            "location": "session",
+            "message": f"{len(silent)} of {len(visible)} visible steps have no narration; the video will be mostly silent",
+        })
+
     # 3. Ending Quality & Structure
     if not steps:
         findings.append({
@@ -1802,6 +2015,14 @@ async def finish(session_id: str) -> dict:
             },
         }
     stored = store.get_session(session_id)
+    if not (stored or {}).get("steps"):
+        # Rendering nothing is not a result. Say so, and leave the session
+        # running so it can still be recorded — or discarded on purpose.
+        return {
+            "ok": False,
+            "error": {"type": "empty_session", "message": "No steps were recorded in this session."},
+            "hint": "Record at least one act, or discard the session with delete_session(confirm=True, force=True).",
+        }
     pending = pending_shots(stored)
     if pending:
         return {
