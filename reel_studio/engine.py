@@ -135,6 +135,38 @@ _COLLECT_ELEMENTS_JS = (
 )
 
 
+# Chrome's own popups are browser UI, not page content: no mask reaches them,
+# and they sit on top of the recording. A real profile (needed for fullscreen,
+# see screen_geometry) offers to save every password typed into it — after an
+# agent signed in, "Save password?" stayed in the corner of the whole video,
+# showing the account's email (2026-10-08). The profile is written with the
+# password manager, autofill, translation and notification prompts off.
+QUIET_PREFERENCES = {
+    "credentials_enable_service": False,
+    "credentials_enable_autosignin": False,
+    "profile": {
+        "password_manager_enabled": False,
+        "default_content_setting_values": {"notifications": 2, "geolocation": 2},
+    },
+    "autofill": {"profile_enabled": False, "credit_card_enabled": False},
+    "translate": {"enabled": False},
+    "browser": {"check_default_browser": False},
+}
+
+QUIET_FLAGS = [
+    "--disable-features=PasswordManagerOnboarding,PasswordLeakDetection,Translate,AutofillServerCommunication",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-infobars",
+]
+
+
+def write_quiet_profile(profile_dir: Path) -> None:
+    default = profile_dir / "Default"
+    default.mkdir(parents=True, exist_ok=True)
+    (default / "Preferences").write_text(json.dumps(QUIET_PREFERENCES))
+
+
 FULLSCREEN_NOTICE_SECONDS = 6.0
 
 
@@ -160,6 +192,7 @@ def screen_geometry(width: int, height: int) -> dict:
             f"--window-size={width + 1},{height + 1}",
             "--window-position=0,0",
             "--start-fullscreen",
+            *QUIET_FLAGS,
         ],
     }
 
@@ -239,6 +272,7 @@ class BrowserSession:
         # A fresh profile per session: no cookie or login carries from one
         # recording to the next. Removed again in _close_runtime.
         profile_dir = Path(tempfile.mkdtemp(prefix="reel-profile-"))
+        write_quiet_profile(profile_dir)
         launched_at = time.monotonic()
         context = await playwright.chromium.launch_persistent_context(
             str(profile_dir),

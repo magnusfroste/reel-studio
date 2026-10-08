@@ -257,3 +257,17 @@ def test_the_screen_is_one_pixel_larger_than_the_recording_and_the_browser_fulls
     assert g["screen"] == "1921x1081x24"
     assert "--start-fullscreen" in g["browser_args"] and "--window-size=1921,1081" in g["browser_args"]
     assert not any("kiosk" in arg for arg in g["browser_args"])
+
+
+def test_a_session_profile_never_offers_to_save_a_password(tmp_path):
+    # Chrome's own popups sit on top of the recording where no mask reaches.
+    # After a sign-in, "Save password?" stayed in the corner of a whole video,
+    # showing the account's email (2026-10-08).
+    import json as _json
+    from reel_studio.engine import screen_geometry, write_quiet_profile
+    write_quiet_profile(tmp_path)
+    prefs = _json.loads((tmp_path / "Default" / "Preferences").read_text())
+    assert prefs["credentials_enable_service"] is False
+    assert prefs["profile"]["password_manager_enabled"] is False
+    assert prefs["translate"]["enabled"] is False
+    assert "--no-first-run" in screen_geometry(1920, 1080)["browser_args"]
