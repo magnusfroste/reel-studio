@@ -43,6 +43,79 @@ from .tts import synthesize
 DEFAULT_OUTPUT_DIR = Path("/home/ubuntu/.video-director/sessions")
 
 
+
+
+# How an element is found again later: a unique id, test id, label, name or
+# placeholder, then link target or button text, then its path. Shared, verbatim,
+# by _stable_selector and the one-pass collector below.
+_STABLE_SELECTOR_JS = """(el) => {
+                const escape = (value) => {
+                    if (globalThis.CSS && CSS.escape) return CSS.escape(value);
+                    return value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+                };
+                const tag = el.tagName.toLowerCase();
+                const id = el.getAttribute('id');
+                if (id && document.querySelectorAll(`#${escape(id)}`).length === 1) {
+                    return `#${escape(id)}`;
+                }
+                for (const attribute of ['data-testid', 'aria-label', 'name', 'placeholder']) {
+                    const value = el.getAttribute(attribute);
+                    if (!value) continue;
+                    const selector = `${tag}[${attribute}=${JSON.stringify(value)}]`;
+                    if (document.querySelectorAll(selector).length === 1) return selector;
+                }
+                const href = el.getAttribute('href');
+                if (tag === 'a' && href) {
+                    const selector = `a[href=${JSON.stringify(href)}]`;
+                    if (document.querySelectorAll(selector).length === 1) return selector;
+                }
+                const text = (el.innerText || '').trim().split(/\\n+/)[0].replace(/\\s+/g, ' ');
+                if (text && ['a', 'button', 'label', '[role=button]'].some((role) =>
+                    role === tag || role === '[role=button]' && el.getAttribute('role') === 'button'
+                )) {
+                    const shortText = text.slice(0, 120);
+                    const target = el.getAttribute('role') === 'button' ? '[role="button"]' : tag;
+                    return `${target}:has-text(${JSON.stringify(shortText)})`;
+                }
+                const parts = [];
+                while (el && el.nodeType === 1 && el !== document.body) {
+                    let index = 1;
+                    let sibling = el.previousElementSibling;
+                    while (sibling) {
+                        if (sibling.tagName === el.tagName) index += 1;
+                        sibling = sibling.previousElementSibling;
+                    }
+                    parts.unshift(`${el.tagName.toLowerCase()}:nth-of-type(${index})`);
+                    el = el.parentElement;
+                }
+                return parts.join(" > ");
+            }"""
+
+# One pass over every matched element, inside the page, replacing a loop of
+# separate round trips per element. Visibility mirrors Playwright's is_visible:
+# a non-empty box and not visibility:hidden.
+_COLLECT_ELEMENTS_JS = (
+    "(elements) => {\n"
+    "    const stableSelector = " + _STABLE_SELECTOR_JS + ";\n"
+    """    const out = [];
+    elements.forEach((el, index) => {
+        const rect = el.getBoundingClientRect();
+        if (!(rect.width > 0 && rect.height > 0)) return;
+        if (getComputedStyle(el).visibility === 'hidden') return;
+        const tag = el.tagName.toLowerCase();
+        const role = el.getAttribute('role') || tag;
+        let text = ['input', 'textarea', 'select'].includes(role) ? '' : (el.innerText || '').trim();
+        if (!text) text = el.getAttribute('aria-label') || el.getAttribute('placeholder') || '';
+        out.push({
+            index, role, text,
+            box: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+            selector: stableSelector(el),
+        });
+    });
+    return out;
+}"""
+)
+
 def output_root() -> Path:
     return Path(os.environ.get("REEL_OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR))).expanduser()
 
@@ -78,6 +151,8 @@ class BrowserSession:
     timeline: list[tuple[float, Path | None, float]] = field(default_factory=list)
     refs_stale: bool = True
     runtime_closed: bool = False
+    # Monotonic time of the last tool call on this session; see touch().
+    last_activity: float = 0.0
     annotation_counter: int = 0
 
     @classmethod
@@ -151,82 +226,53 @@ class BrowserSession:
         return screenshot
 
     async def _stable_selector(self, item: Locator) -> str:
-        return await item.evaluate(
-            """(el) => {
-                const escape = (value) => {
-                    if (globalThis.CSS && CSS.escape) return CSS.escape(value);
-                    return value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
-                };
-                const tag = el.tagName.toLowerCase();
-                const id = el.getAttribute('id');
-                if (id && document.querySelectorAll(`#${escape(id)}`).length === 1) {
-                    return `#${escape(id)}`;
-                }
-                for (const attribute of ['data-testid', 'aria-label', 'name', 'placeholder']) {
-                    const value = el.getAttribute(attribute);
-                    if (!value) continue;
-                    const selector = `${tag}[${attribute}=${JSON.stringify(value)}]`;
-                    if (document.querySelectorAll(selector).length === 1) return selector;
-                }
-                const href = el.getAttribute('href');
-                if (tag === 'a' && href) {
-                    const selector = `a[href=${JSON.stringify(href)}]`;
-                    if (document.querySelectorAll(selector).length === 1) return selector;
-                }
-                const text = (el.innerText || '').trim().split(/\\n+/)[0].replace(/\\s+/g, ' ');
-                if (text && ['a', 'button', 'label', '[role=button]'].some((role) =>
-                    role === tag || role === '[role=button]' && el.getAttribute('role') === 'button'
-                )) {
-                    const shortText = text.slice(0, 120);
-                    const target = el.getAttribute('role') === 'button' ? '[role="button"]' : tag;
-                    return `${target}:has-text(${JSON.stringify(shortText)})`;
-                }
-                const parts = [];
-                while (el && el.nodeType === 1 && el !== document.body) {
-                    let index = 1;
-                    let sibling = el.previousElementSibling;
-                    while (sibling) {
-                        if (sibling.tagName === el.tagName) index += 1;
-                        sibling = sibling.previousElementSibling;
-                    }
-                    parts.unshift(`${el.tagName.toLowerCase()}:nth-of-type(${index})`);
-                    el = el.parentElement;
-                }
-                return parts.join(" > ");
-            }"""
-        )
+        return await item.evaluate(_STABLE_SELECTOR_JS)
 
-    async def observe(self) -> tuple[dict, Path]:
-        screenshot = await self.capture_screenshot()
+    def touch(self) -> None:
+        """Note that an agent is still directing this session."""
+        self.last_activity = time.monotonic()
+
+    async def observe(self, detail: str = "full") -> tuple[dict, Path | None]:
+        """Capture the page and its interactive elements.
+
+        Elements are collected in one pass inside the page. The previous loop
+        asked the browser seven or so questions per element — visible? box?
+        role? text? selector? — so a page with a few hundred controls took
+        tens of seconds and, on a busy host, timed out (2026-10-07). The rules
+        are unchanged: same selector, same visibility test as Playwright's
+        (a non-empty box and not visibility:hidden), same text and refs.
+
+        ``detail="refs"`` skips the screenshot and page text and returns only
+        ref, role and text per element: what an agent needs to act, at a
+        fraction of the size.
+        """
+        screenshot = await self.capture_screenshot() if detail != "refs" else None
         self.refs.clear()
-        page_text = (await self.page.locator("body").inner_text())[:4000]
+        collected = await self.page.locator(
+            "a,button,input,textarea,select,[role=button],[onclick]"
+        ).evaluate_all(_COLLECT_ELEMENTS_JS)
         elements = []
         used_refs: set[str] = set()
-        locator = self.page.locator("a,button,input,textarea,select,[role=button],[onclick]")
-        count = await locator.count()
-        for index in range(count):
-            item = locator.nth(index)
-            if not await item.is_visible():
-                continue
-            box = await item.bounding_box()
-            role = await item.get_attribute("role") or (await item.evaluate(
-                "(el) => el.tagName.toLowerCase()"
-            ))
-            text = (await item.inner_text()).strip() if role not in {"input", "textarea", "select"} else ""
-            if not text:
-                text = await item.get_attribute("aria-label") or await item.get_attribute("placeholder") or ""
-            ref = semantic_ref(role, text, index, used_refs)
-            self.refs[ref] = await self._stable_selector(item)
-            elements.append({"ref": ref, "role": role, "text": text, "box": box})
+        for item in collected:
+            role, text = item["role"], item["text"]
+            ref = semantic_ref(role, text, item["index"], used_refs)
+            self.refs[ref] = item["selector"]
+            if detail == "refs":
+                elements.append({"ref": ref, "role": role, "text": text})
+            else:
+                elements.append({"ref": ref, "role": role, "text": text, "box": item["box"]})
         self.refs_stale = False
-        return {
-            "screenshot_path": str(screenshot),
+        payload: dict = {
             "url": self.page.url,
             "title": await self.page.title(),
-            "page_text": page_text,
             "elements": elements,
             "refs_stale": False,
-        }, screenshot
+            "detail": detail,
+        }
+        if detail != "refs":
+            payload["screenshot_path"] = str(screenshot)
+            payload["page_text"] = (await self.page.locator("body").inner_text())[:4000]
+        return payload, screenshot
 
     async def _inject_spotlight(self, target: Locator) -> None:
         await target.evaluate(

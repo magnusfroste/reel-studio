@@ -102,6 +102,18 @@ stdio:
 ```
 
 Tools are `start_session`, `observe`, `act`, `finish`, and `get_status`.
+The `director` MCP prompt walks an agent through the whole loop — plan, one
+session, `act_batch` per beat, narration on every visible step, shots, review,
+`finish` once. `act` and `act_batch` publish the full action contract (every
+verb and its fields) in their input schema, inline with no `$ref`.
+`observe(detail="refs")` returns only ref, role and text per element — no
+screenshot or page text — for when an agent only needs refs to act; elements are
+collected in one pass inside the page either way. A session with no tool call
+for `REEL_IDLE_TIMEOUT_SECONDS` (default `900`, `0` disables) stops recording and
+is marked as ended without a video; its media stays. `observe` gives up after
+`REEL_OBSERVE_TIMEOUT_SECONDS` (default `60`) with a hint instead of hanging the
+client. `finish` refuses a session with no recorded steps, and `review_session`
+flags a take whose visible steps are mostly silent.
 `start_session` captures at 1920x1080 by default; `width` and `height` remain
 overridable. Set optional `output_size` (for example `1280x720`) to downscale
 only the final MP4 while retaining the larger capture viewport, or set

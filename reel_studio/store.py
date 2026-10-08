@@ -323,6 +323,16 @@ def finish_session(
         )
 
 
+def mark_session_error(session_id: str) -> None:
+    """Record that a session ended without a video (abandoned or aborted)."""
+    init_schema()
+    with _lock, _connect() as connection:
+        connection.execute(
+            "UPDATE sessions SET status = 'error', finished_at = ? WHERE id = ? AND status = 'active'",
+            (_now(), session_id),
+        )
+
+
 def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 100))
     init_schema()
