@@ -664,13 +664,16 @@ def watch_page(session_id: str, base_url: str = "/") -> str | None:
         except (TypeError, ValueError):
             offset_seconds = 0.0
         offset = f"{offset_seconds:.1f}s"
+        # Outside the f-string: a backslash inside an f-string expression is a
+        # SyntaxError before Python 3.12, and CI runs 3.10.
+        narration_html = html.escape(narration) if narration else '<span class="muted">(No narration)</span>'
         step_items.append(
             f"""<li style="margin-bottom:12px; padding:10px; background:#1b2130; border-radius:8px;">
                 <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
                     <strong style="color:#8ea7ff;">Step {idx}: {html.escape(action_type)} {html.escape(target)}</strong>
                     <span class="muted">{offset}</span>
                 </div>
-                <p style="margin:0; font-size:0.95rem; color:#dbe2ff;">{html.escape(narration) if narration else '<span class=\"muted\">(No narration)</span>'}</p>
+                <p style="margin:0; font-size:0.95rem; color:#dbe2ff;">{narration_html}</p>
             </li>"""
         )
     steps_html = "".join(step_items) if step_items else '<li class="muted">No step breakdown recorded.</li>'
