@@ -35,6 +35,7 @@ from .render import (
     segmented_render,
     segmented_render_enabled,
 )
+from .camera import MAX_ZOOM, Camera
 from .schema import ACTION_CONTRACT, ACTION_TYPES, FRAMINGS, Action, action_json_schema, mask_stylesheet
 from .tts import TTSProviderError, normalize_provider, synthesize, validate_provider
 
@@ -957,9 +958,12 @@ def docs_page(base_url: str = "/") -> str:
       sessions are reported as stale and are not resumed. The response also
       includes director storyboard shots.</p></div>
     <div class="tool card"><h3><code>begin_shot(session_id, shot_id, intent, framing, zoom?, focus_ref?, focus_text?)</code></h3>
-      <p>Declare the director's intent before recording a scene. Framing is
-      <code>wide</code>, <code>medium</code>, or <code>close</code>; zoom must be
-      between <code>0.5</code> and <code>2.0</code>.</p></div>
+      <p>Declare the director's intent before recording a scene, and move the
+      camera: <code>wide</code> shows the whole page, <code>medium</code> pushes in
+      to 1.5x and <code>close</code> to 2x on <code>focus_ref</code> or
+      <code>focus_text</code>; an explicit zoom is between <code>1</code> and
+      <code>2.5</code>. The move eases in over a second from the shot's first
+      step.</p></div>
     <div class="tool card"><h3><code>verify_shot(session_id, shot_id, verified, verification_note?)</code></h3>
       <p>Record whether the intended focus was visible, readable, and aligned
       with the narration. Failed shots become <code>needs_review</code>.</p></div>
@@ -1272,15 +1276,32 @@ The screen records from start_session until finish, so plan first and record onc
 6. Narrate every step a viewer sees. Steps without narration are silent. Where the
    video will autoplay muted (LinkedIn, X), also put the key line on screen with a
    caption step.
-7. begin_shot before a beat and verify_shot after it; framing is wide, medium or
-   close, and the description goes in intent. finish refuses to publish while a
-   shot is unverified.
+7. begin_shot before a beat and verify_shot after it; the description goes in
+   intent. finish refuses to publish while a shot is unverified. begin_shot is
+   also the camera, moved in post with the text kept sharp:
+   - wide shows the whole page; medium pushes in 1.5x, close 2x, on focus_ref or
+     focus_text. Always give a focus for medium and close.
+   - The move starts with the shot's first step and takes a second: put the
+     narration that names the detail on that step, so the camera lands as the
+     voice gets there.
+   - Establish wide on each new page, push in on the one detail that matters,
+     pull back to wide before moving on. A new page returns to wide by itself.
+   - Three to five push-ins in a 60-90 s video; not every beat. A camera that
+     never rests is as tiring as one that never moves.
+   - While pushed in, the camera pans to anything you click or type into off
+     frame, and captions are drawn inside the frame.
 8. Keep secrets unreadable: start_session(mask=[CSS selectors]) blurs matching
    elements on every page from the first frame; the mask action blurs one element.
 9. Several controls can share a name (a "Sign In" tab and a "Sign In" button):
    observe marks them same_name, and the one that submits a form submits_form.
 10. Run review_session and re-record what it flags. Then call finish once. Narration
    wording is fixed after finish: update_step_narration for each line, then rerender.
+11. Craft. The first three seconds decide whether anyone watches: open on the
+   claim or the result, not on a login or a logo. Tell it as problem, what the
+   product does about it, proof on screen, then one call to action. Narrate what
+   the viewer gains, not the name of each button. Something should change every
+   10-20 seconds: a new page, a push-in, a caption. Hold a still frame for a
+   beat after a result appears, so it registers.
 """
 
 
@@ -1622,11 +1643,18 @@ async def begin_shot(
         Field(description="How much of the page the shot shows: wide, medium or close.",
               json_schema_extra={"enum": list(FRAMINGS)}),
     ],
-    zoom: float | None = None,
+    zoom: Annotated[
+        float | None,
+        Field(description="Overrides the framing's zoom: 1 (whole page) to 2.5."),
+    ] = None,
     focus_ref: str | None = None,
     focus_text: str | None = None,
 ) -> dict:
-    """Declare a director storyboard shot before recording it."""
+    """Declare a director storyboard shot, and move the camera for it.
+
+    wide shows the whole page; medium pushes in 1.5x and close 2x on focus_ref
+    or focus_text. The move eases in over a second from the shot's next step.
+    """
     _touch(session_id)
     if store.get_session(session_id) is None:
         return {"ok": False, "error": {"type": "unknown_session", "message": session_id}}
@@ -1638,8 +1666,12 @@ async def begin_shot(
             "error": {"type": "invalid_framing", "message": framing},
             "hint": f"framing is one of {', '.join(FRAMINGS)}; put the description in intent.",
         }
-    if zoom is not None and not 0.5 <= zoom <= 2.0:
-        return {"ok": False, "error": {"type": "invalid_zoom", "message": "zoom must be 0.5-2.0"}}
+    if zoom is not None and not 1.0 <= zoom <= MAX_ZOOM:
+        return {
+            "ok": False,
+            "error": {"type": "invalid_zoom", "message": f"zoom must be 1-{MAX_ZOOM:g}"},
+            "hint": "zoom is the camera: 1 is the whole page. To shrink the page itself, use the set_zoom action.",
+        }
     if not intent.strip() or not shot_id.strip():
         return {"ok": False, "error": {"type": "invalid_shot", "message": "shot_id and intent are required"}}
     try:
@@ -1650,7 +1682,15 @@ async def begin_shot(
         )
     except Exception as exc:
         return {"ok": False, "error": {"type": "shot_error", "message": str(exc)}}
-    return {"ok": True, "shot": shot}
+    result: dict = {"ok": True, "shot": shot}
+    live = sessions.get(session_id)
+    if live is not None:
+        result.update(await live.set_shot(
+            framing, zoom,
+            focus_ref.strip() if focus_ref else None,
+            focus_text.strip() if focus_text else None,
+        ))
+    return result
 
 
 @mcp.tool()
@@ -1797,7 +1837,7 @@ async def rerender(session_id: str) -> dict:
         )
         result = await asyncio.to_thread(
             segmented_render, source_video, render_steps, video_path, output_size,
-            render_config,
+            render_config, Camera.load(output_dir),
         )
         warnings = result.warnings
         duration = result.duration
@@ -1811,7 +1851,7 @@ async def rerender(session_id: str) -> dict:
         )
         await asyncio.to_thread(
             rerender_narration, source_video, clips, video_path, output_size,
-            render_config,
+            render_config, Camera.load(output_dir),
         )
         duration = await asyncio.to_thread(probe_duration, video_path)
     store.update_session_duration(session_id, duration)
@@ -1975,6 +2015,24 @@ async def review_session(session_id: str) -> dict:
             "severity": "medium",
             "location": "session",
             "message": f"{len(silent)} of {len(visible)} visible steps have no narration; the video will be mostly silent",
+        })
+
+    # 2c. Camera. A minute of the same wide frame plays as a screen capture,
+    # not a film; product videos change something every 10-20 seconds.
+    live = sessions.get(session_id)
+    camera = live.camera if live is not None else None
+    video_path_value = session.get("video_path")
+    if camera is None and isinstance(video_path_value, str) and video_path_value:
+        camera = Camera.load(Path(video_path_value).parent)
+    estimated = float(session.get("duration_seconds") or 0.0) or sum(
+        float(step.get("narration_duration") or 0.0) for step in steps
+    )
+    if camera is not None and estimated >= 40 and not camera.moves():
+        findings.append({
+            "category": "camera_static",
+            "severity": "low",
+            "location": "session",
+            "message": "The camera never moves: push in on the key detail of a beat with begin_shot(framing='close', focus_ref=...), then back to wide",
         })
 
     # 3. Ending Quality & Structure

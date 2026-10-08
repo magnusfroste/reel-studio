@@ -244,7 +244,7 @@ def test_editing_narration_before_finish_says_the_order_that_works(mods):
 def test_the_director_prompt_covers_masks_shared_names_and_captions(mods):
     server, _, _ = mods
     text = server.director()
-    for must in ("mask=", "same_name", "submits_form", "caption", "wide, medium or", "update_step_narration"):
+    for must in ("mask=", "same_name", "submits_form", "caption", "medium pushes in", "update_step_narration"):
         assert must in text
 
 
