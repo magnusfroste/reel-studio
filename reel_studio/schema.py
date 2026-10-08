@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 class Action(BaseModel):
     type: Literal[
         "goto", "click", "click_and_wait", "type", "select_option", "press_key", "set_zoom", "annotate", "scroll", "scroll_to_text",
-        "hover", "highlight", "wait", "caption",
+        "hover", "highlight", "wait", "caption", "mask", "unmask",
     ]
     url: str | None = None
     ref: str | None = None
@@ -47,6 +47,8 @@ ACTION_FIELDS: dict[str, str] = {
     "caption": "text, ms",
     "set_zoom": "text (a level from 0.5 to 2.0, e.g. \"1.25\")",
     "annotate": "ref, text, style (marker | callout | underline)",
+    "mask": "ref (blurs that element on screen until unmask or a page load)",
+    "unmask": "ref",
 }
 
 ACTION_CONTRACT = (
@@ -84,3 +86,26 @@ def action_json_schema() -> dict[str, Any]:
             "narration_timing": {"type": "string", "enum": ["before_action", "after_action", "after_settle"]},
         },
     }
+
+
+FRAMINGS: tuple[str, ...] = ("wide", "medium", "close")
+
+
+def mask_stylesheet(selectors: list[str] | None) -> str:
+    """CSS that blurs every element matching any of the selectors.
+
+    One rule per selector, so a selector the browser does not understand
+    drops only its own rule. Braces are refused: a selector is not a place
+    to write CSS, and one could close the rule and add arbitrary styles.
+    """
+    rules = []
+    for raw in selectors or []:
+        selector = str(raw).strip()
+        if not selector:
+            continue
+        if "{" in selector or "}" in selector:
+            raise ValueError(f"mask selector may not contain braces: {selector!r}")
+        rules.append(
+            f"{selector} {{ filter: blur(9px) !important; user-select: none !important; }}"
+        )
+    return "\n".join(rules)

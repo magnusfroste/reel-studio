@@ -196,3 +196,53 @@ def test_one_successful_step_is_enough_to_render(mods):
     result = asyncio.run(server.finish("s-one-ok"))
     # A stand-in session cannot render; what matters is that it got past the check.
     assert result.get("error", {}).get("type") != "empty_session"
+
+
+# ---- Round two: from the agent's second recording, 2026-10-08 -------------
+
+def test_mask_is_a_verb_and_framing_lists_its_values(mods):
+    server, _, _ = mods
+    tools = _tools(server)
+    verbs = tools["act"].inputSchema["properties"]["action"]["properties"]["type"]["enum"]
+    assert "mask" in verbs and "unmask" in verbs
+    assert tools["begin_shot"].inputSchema["properties"]["framing"]["enum"] == ["wide", "medium", "close"]
+    assert "mask" in tools["start_session"].inputSchema["properties"]
+
+
+def test_a_mask_selector_becomes_one_rule_and_braces_are_refused():
+    from reel_studio.schema import mask_stylesheet
+    css = mask_stylesheet(["input[type=password]", "  ", "[data-secret]"])
+    assert css.count("blur(9px)") == 2 and "[data-secret] {" in css
+    with pytest.raises(ValueError):
+        mask_stylesheet(["a } body { display: none"])
+
+
+def test_start_session_refuses_a_bad_mask_before_any_browser_starts(mods):
+    server, _, _ = mods
+    result = asyncio.run(server.start_session("https://example.com", mask=["a{}"]))
+    assert result["error"]["type"] == "invalid_mask"
+
+
+def test_a_described_framing_is_refused_with_the_three_words(mods):
+    server, store, _ = mods
+    _new_session(store, "s-framing")
+    result = asyncio.run(server.begin_shot("s-framing", "opener", "Show the shop", "full page, top of the shop"))
+    assert result["error"]["type"] == "invalid_framing"
+    assert "wide, medium, close" in result["hint"]
+    ok = asyncio.run(server.begin_shot("s-framing", "opener", "Show the shop", " Wide "))
+    assert ok["ok"]
+
+
+def test_editing_narration_before_finish_says_the_order_that_works(mods):
+    server, store, _ = mods
+    _new_session(store, "s-early-edit")
+    result = asyncio.run(server.update_step_narration("s-early-edit", 0, "Better line."))
+    assert result["error"]["type"] == "session_not_finished"
+    assert "finish first" in result["hint"].lower() and "rerender" in result["hint"]
+
+
+def test_the_director_prompt_covers_masks_shared_names_and_captions(mods):
+    server, _, _ = mods
+    text = server.director()
+    for must in ("mask=", "same_name", "submits_form", "caption", "wide, medium or", "update_step_narration"):
+        assert must in text

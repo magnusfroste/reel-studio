@@ -35,7 +35,7 @@ from .render import (
     segmented_render,
     segmented_render_enabled,
 )
-from .schema import ACTION_CONTRACT, ACTION_TYPES, Action, action_json_schema
+from .schema import ACTION_CONTRACT, ACTION_TYPES, FRAMINGS, Action, action_json_schema, mask_stylesheet
 from .tts import TTSProviderError, normalize_provider, synthesize, validate_provider
 
 
@@ -1269,10 +1269,18 @@ The screen records from start_session until finish, so plan first and record onc
 4. Use act_batch for each beat (up to 20 steps): one round trip, not one per click.
 5. observe once per page and reuse its refs; observe(detail="refs") when you only
    need refs. Observe again after the URL changes or an action reports stale_refs.
-6. Narrate every step a viewer sees. Steps without narration are silent.
-7. begin_shot before a beat and verify_shot after it; finish refuses to publish
-   while a shot is unverified.
-8. Run review_session, fix what it reports, then call finish once.
+6. Narrate every step a viewer sees. Steps without narration are silent. Where the
+   video will autoplay muted (LinkedIn, X), also put the key line on screen with a
+   caption step.
+7. begin_shot before a beat and verify_shot after it; framing is wide, medium or
+   close, and the description goes in intent. finish refuses to publish while a
+   shot is unverified.
+8. Keep secrets unreadable: start_session(mask=[CSS selectors]) blurs matching
+   elements on every page from the first frame; the mask action blurs one element.
+9. Several controls can share a name (a "Sign In" tab and a "Sign In" button):
+   observe marks them same_name, and the one that submits a form submits_form.
+10. Run review_session and re-record what it flags. Then call finish once. Narration
+   wording is fixed after finish: update_step_narration for each line, then rerender.
 """
 
 
@@ -1293,6 +1301,12 @@ async def start_session(
     cta_url: str = "",
     cta_text: str = "Learn more",
     music: str = "none",
+    mask: Annotated[
+        list[str] | None,
+        Field(description="CSS selectors blurred on every page from the first frame, e.g. "
+                          "[\"input[type=password]\", \"[data-secret]\"]. For anything that must "
+                          "never be readable in the video: keys, tokens, personal data."),
+    ] = None,
 ) -> dict:
     """Launch a headed browser and begin recording.
 
@@ -1302,6 +1316,9 @@ async def start_session(
     en-US-JennyNeural on the free Edge provider (provider "elevenlabs" needs
     ELEVENLABS_API_KEY and takes a voice id); no music ("subtle" adds a quiet
     bed); title/subtitle add a 3-second intro card, cta_url/cta_text an outro.
+
+    mask blurs matching elements on every page from the first frame; the
+    mask action does the same for one element mid-recording.
 
     One session at a time: every session you start must end with finish, or
     it keeps recording until it has been idle for REEL_IDLE_TIMEOUT_SECONDS.
@@ -1323,12 +1340,16 @@ async def start_session(
             "ok": False,
             "error": {"type": "invalid_output_size", "message": str(exc)},
         }
+    try:
+        mask_stylesheet(mask)
+    except ValueError as exc:
+        return {"ok": False, "error": {"type": "invalid_mask", "message": str(exc)}}
     render_config = _render_config(
         title, subtitle, accent, cta_url, cta_text, music
     )
     session = await BrowserSession.create(
         start_url, width, height, voice, selected_provider, selected_output_size,
-        render_config,
+        render_config, mask_selectors=mask,
     )
     session.touch()
     others = [other for other in sessions if other != session.session_id]
@@ -1596,7 +1617,11 @@ async def begin_shot(
     session_id: str,
     shot_id: str,
     intent: str,
-    framing: str,
+    framing: Annotated[
+        str,
+        Field(description="How much of the page the shot shows: wide, medium or close.",
+              json_schema_extra={"enum": list(FRAMINGS)}),
+    ],
     zoom: float | None = None,
     focus_ref: str | None = None,
     focus_text: str | None = None,
@@ -1606,8 +1631,13 @@ async def begin_shot(
     if store.get_session(session_id) is None:
         return {"ok": False, "error": {"type": "unknown_session", "message": session_id}}
     framing = framing.strip().lower()
-    if framing not in {"wide", "medium", "close"}:
-        return {"ok": False, "error": {"type": "invalid_framing", "message": framing}}
+    if framing not in FRAMINGS:
+        # Describe the shot in intent; framing is one of three words.
+        return {
+            "ok": False,
+            "error": {"type": "invalid_framing", "message": framing},
+            "hint": f"framing is one of {', '.join(FRAMINGS)}; put the description in intent.",
+        }
     if zoom is not None and not 0.5 <= zoom <= 2.0:
         return {"ok": False, "error": {"type": "invalid_zoom", "message": "zoom must be 0.5-2.0"}}
     if not intent.strip() or not shot_id.strip():
@@ -1675,6 +1705,9 @@ def _editable_session(session_id: str) -> tuple[dict | None, dict | None]:
                 "type": "session_not_finished",
                 "message": "Narration editing requires a finished session with a video.",
             },
+            # The clips of a live take are already laid into its timeline;
+            # an edit belongs to the finished video, where rerender re-times it.
+            "hint": "Call finish first, then update_step_narration for each line and rerender once.",
         }
     return session, None
 
