@@ -114,6 +114,11 @@ is marked as ended without a video; its media stays. `observe` gives up after
 `REEL_OBSERVE_TIMEOUT_SECONDS` (default `60`) with a hint instead of hanging the
 client. `finish` refuses a session with no recorded steps, and `review_session`
 flags a take whose visible steps are mostly silent.
+`start_session(mask=[...])` takes CSS selectors that are blurred on every page from
+the first frame — keys, tokens, personal data never appear readable — and the
+`mask`/`unmask` actions blur one element mid-recording. When several controls
+share a name, `observe` marks them `same_name` and flags the one that
+`submits_form`; every stored selector matches exactly one element.
 `start_session` captures at 1920x1080 by default; `width` and `height` remain
 overridable. Set optional `output_size` (for example `1280x720`) to downscale
 only the final MP4 while retaining the larger capture viewport, or set

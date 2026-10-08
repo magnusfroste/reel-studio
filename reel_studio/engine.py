@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 import asyncio
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -36,7 +37,7 @@ from .annotations import (
     validate_annotation,
 )
 from .refs import semantic_ref
-from .schema import Action
+from .schema import Action, mask_stylesheet
 from .tts import synthesize
 
 
@@ -75,7 +76,19 @@ _STABLE_SELECTOR_JS = """(el) => {
                 )) {
                     const shortText = text.slice(0, 120);
                     const target = el.getAttribute('role') === 'button' ? '[role="button"]' : tag;
-                    return `${target}:has-text(${JSON.stringify(shortText)})`;
+                    // :has-text matches every element of that kind whose text
+                    // contains this, case-insensitively, and the action takes
+                    // the first. A login page with a "Sign In" tab above a
+                    // "Sign In" submit button sent every click to the tab
+                    // (2026-10-08). Use the text only when it is unique; else
+                    // fall through to the position path, which always is.
+                    const needle = shortText.toLowerCase();
+                    const rivals = Array.from(document.querySelectorAll(target)).filter((other) =>
+                        (other.innerText || '').toLowerCase().includes(needle)
+                    );
+                    if (rivals.length === 1) {
+                        return `${target}:has-text(${JSON.stringify(shortText)})`;
+                    }
                 }
                 const parts = [];
                 while (el && el.nodeType === 1 && el !== document.body) {
@@ -106,8 +119,11 @@ _COLLECT_ELEMENTS_JS = (
         const role = el.getAttribute('role') || tag;
         let text = ['input', 'textarea', 'select'].includes(role) ? '' : (el.innerText || '').trim();
         if (!text) text = el.getAttribute('aria-label') || el.getAttribute('placeholder') || '';
+        const type = (el.getAttribute('type') || '').toLowerCase();
+        const submits = (tag === 'button' && (type === 'submit' || (!type && el.form)))
+            || (tag === 'input' && type === 'submit');
         out.push({
-            index, role, text,
+            index, role, text, submits,
             box: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
             selector: stableSelector(el),
         });
@@ -165,8 +181,10 @@ class BrowserSession:
         provider: str = "edge",
         output_size: tuple[int, int] | None = None,
         render_config: RenderConfig | None = None,
+        mask_selectors: list[str] | None = None,
     ) -> "BrowserSession":
         session_id = uuid.uuid4().hex
+        mask_css = mask_stylesheet(mask_selectors)
         directory = output_root() / session_id
         directory.mkdir(parents=True, exist_ok=True)
         display_number = _free_display()
@@ -190,6 +208,18 @@ class BrowserSession:
             args=[f"--window-size={width},{height}", "--window-position=0,0", "--kiosk"],
         )
         context = await browser.new_context(viewport={"width": width, "height": height})
+        if mask_css:
+            # Applied by the browser before any page script runs, on every page
+            # and frame, so a masked element is blurred from its first frame —
+            # a secret never flashes past before an agent gets to mask it.
+            await context.add_init_script(
+                "(() => { const css = " + json.dumps(mask_css) + ";"
+                " const add = () => { const s = document.createElement('style');"
+                " s.dataset.reelMask = 'session'; s.textContent = css;"
+                " (document.head || document.documentElement).appendChild(s); };"
+                " if (document.documentElement) add();"
+                " else document.addEventListener('DOMContentLoaded', add); })()"
+            )
         page = await context.new_page()
         await page.goto(start_url, wait_until="domcontentloaded")
         await page.wait_for_timeout(500)
@@ -253,14 +283,28 @@ class BrowserSession:
         ).evaluate_all(_COLLECT_ELEMENTS_JS)
         elements = []
         used_refs: set[str] = set()
+        # Two controls with one name — the "Sign In" tab and the "Sign In"
+        # button of a login form — got refs a suffix apart and nothing else
+        # to tell them by; an agent clicked the tab, nothing submitted, and the
+        # sign-in had to be recorded twice (2026-10-08). Say how many share a
+        # name, and which of them submits a form.
+        name_counts: dict[tuple[str, str], int] = {}
+        for item in collected:
+            key = (item["role"], item["text"].strip().lower())
+            name_counts[key] = name_counts.get(key, 0) + 1
         for item in collected:
             role, text = item["role"], item["text"]
             ref = semantic_ref(role, text, item["index"], used_refs)
             self.refs[ref] = item["selector"]
-            if detail == "refs":
-                elements.append({"ref": ref, "role": role, "text": text})
-            else:
-                elements.append({"ref": ref, "role": role, "text": text, "box": item["box"]})
+            element = {"ref": ref, "role": role, "text": text}
+            if detail != "refs":
+                element["box"] = item["box"]
+            shared = name_counts[(role, text.strip().lower())]
+            if shared > 1:
+                element["same_name"] = shared
+            if item.get("submits"):
+                element["submits_form"] = True
+            elements.append(element)
         self.refs_stale = False
         payload: dict = {
             "url": self.page.url,
@@ -553,7 +597,7 @@ class BrowserSession:
                         "follow_target": True,
                     },
                 )
-            elif action_type in {"click", "click_and_wait", "type", "select_option", "press_key", "hover", "highlight"}:
+            elif action_type in {"click", "click_and_wait", "type", "select_option", "press_key", "hover", "highlight", "mask", "unmask"}:
                 if not action.ref or action.ref not in self.refs:
                     return await self.error_result(
                         "unknown_ref", f"Unknown element ref: {action.ref}"
@@ -604,6 +648,16 @@ class BrowserSession:
                     await target.press(key)
                 elif action_type == "hover":
                     await target.hover()
+                elif action_type == "mask":
+                    await target.evaluate(
+                        "(el) => { el.dataset.reelMaskedFilter = el.style.filter || '';"
+                        " el.style.setProperty('filter', 'blur(9px)', 'important'); }"
+                    )
+                elif action_type == "unmask":
+                    await target.evaluate(
+                        "(el) => { el.style.filter = el.dataset.reelMaskedFilter || '';"
+                        " delete el.dataset.reelMaskedFilter; }"
+                    )
                 else:
                     if action.spotlight:
                         await self._inject_spotlight(target)
