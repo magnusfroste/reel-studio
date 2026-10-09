@@ -181,3 +181,14 @@ def test_a_shot_moves_the_camera_where_its_footage_starts():
     source = inspect.getsource(BrowserSession.act)
     applied = source.index("self.camera.move(offset, *self.pending_shot)")
     assert applied > source.index("offset = action_completed_at")
+
+
+def test_a_new_page_cuts_to_wide_instead_of_easing():
+    camera = Camera(1920, 1080, 4 / 3)
+    camera.move(10.0, 2.0, 400, 300)
+    camera.move(20.0, 1.0, ease=0.0)
+    assert camera.keys[-1]["ease"] == 0.0
+    assert "ease" not in camera.keys[0]
+    expression = camera.zoompan(19.5, 21.0, (1920, 1080))
+    assert "/0.001," in expression  # a step, not a one-second ease
+    assert "/1.000," not in expression.split("20.000")[1].split(")")[0]

@@ -68,8 +68,8 @@ def capture_scale(width: int, height: int) -> float:
     return 1.0
 
 
-def _ease_term(t: str, start: float) -> str:
-    u = f"clip(({t}-{start:.3f})/{EASE_SECONDS:.3f},0,1)"
+def _ease_term(t: str, start: float, seconds: float = EASE_SECONDS) -> str:
+    u = f"clip(({t}-{start:.3f})/{max(seconds, 0.001):.3f},0,1)"
     return f"({u}*{u}*(3-2*{u}))"
 
 
@@ -118,8 +118,15 @@ class Camera:
         y = min(max(cy - h / 2, 0.0), self.height - h)
         return {"x": x, "y": y, "w": w, "h": h, "zoom": zoom}
 
-    def move(self, t: float, zoom: float, cx: float | None = None, cy: float | None = None) -> bool:
-        """Add a key at t. Returns False when it would not change the shot."""
+    def move(
+        self, t: float, zoom: float, cx: float | None = None, cy: float | None = None,
+        ease: float = EASE_SECONDS,
+    ) -> bool:
+        """Add a key at t. Returns False when it would not change the shot.
+
+        ``ease`` 0 is a cut to the new framing: a new page starts wide on its
+        first frame instead of zooming out over it.
+        """
         zoom = min(max(zoom, 1.0), MAX_ZOOM)
         current = self.final_state()
         if zoom == 1.0:
@@ -133,8 +140,11 @@ class Camera:
         # the previous one replaces it.
         if self.keys and abs(self.keys[-1]["t"] - t) < 1e-3:
             self.keys.pop()
-        self.keys.append({"t": round(t, 3), "zoom": round(zoom, 4),
-                          "cx": round(cx, 1), "cy": round(cy, 1)})
+        key = {"t": round(t, 3), "zoom": round(zoom, 4),
+               "cx": round(cx, 1), "cy": round(cy, 1)}
+        if ease != EASE_SECONDS:
+            key["ease"] = round(ease, 3)
+        self.keys.append(key)
         return True
 
     def _anchor(self, box: dict, zoom: float) -> tuple[float, float, float, float]:
@@ -205,7 +215,7 @@ class Camera:
         values = [[f"{base[0]:.4f}"], [f"{base[1]:.1f}"], [f"{base[2]:.1f}"]]
         for key in active:
             current = (key["zoom"], key["cx"], key["cy"])
-            ease = _ease_term(t, key["t"])
+            ease = _ease_term(t, key["t"], key.get("ease", EASE_SECONDS))
             for axis in range(3):
                 delta = current[axis] - previous[axis]
                 if abs(delta) > 1e-6:

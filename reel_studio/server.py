@@ -432,6 +432,7 @@ def video_card(session: dict) -> str:
         <div style="margin-top:10px; display:flex; gap:10px;">
           <a class="button secondary" style="font-size:0.85rem; padding:6px 12px;" href="/watch/{session_id}">Watch Theater</a>
           <a class="button secondary" style="font-size:0.85rem; padding:6px 12px;" href="{video_url(session_id)}" download>Download</a>
+          <button type="button" class="button secondary" style="font-size:0.85rem; padding:6px 12px;" data-share-path="/watch/{session_id}" data-share-title="{title}">Share</button>
           <button type="button" class="delete-button" data-delete-id="{session_id}" data-delete-title="{title}">Delete</button>
         </div>
       </div>
@@ -503,6 +504,30 @@ def video_admin_script() -> str:
     check that protects the MCP endpoint.
     """
     return """<script>
+    (() => {
+      // Share: the watch page's own address. On a phone the system share
+      // sheet; elsewhere the link goes to the clipboard and the button says so.
+      document.addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-share-path]");
+        if (!button) return;
+        const url = location.origin + button.dataset.sharePath;
+        const touch = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+        if (touch && navigator.share) {
+          try { await navigator.share({ title: button.dataset.shareTitle || document.title, url }); return; }
+          catch (error) { if (error && error.name === "AbortError") return; }
+        }
+        try {
+          await navigator.clipboard.writeText(url);
+        } catch (error) {
+          window.prompt("Copy this link:", url);
+          return;
+        }
+        const label = button.dataset.label || button.textContent;
+        button.dataset.label = label;
+        button.textContent = "Link copied ✓";
+        setTimeout(() => { button.textContent = label; }, 2000);
+      });
+    })();
     (() => {
       const TOKEN_KEY = "reel-studio-admin-token";
       const askToken = (retry) => {
@@ -696,6 +721,7 @@ def watch_page(session_id: str, base_url: str = "/") -> str | None:
     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px; margin-bottom:32px;">
       <div style="display:flex; gap:12px;">
         <a class="button" href="{video_url(session_id)}" download>Download MP4</a>
+        <button type="button" class="button secondary" data-share-path="/watch/{session_id}" data-share-title="{html.escape(title, quote=True)}">Share link</button>
         <a class="button secondary" href="/theater">All Videos</a>
         <button type="button" class="delete-button" data-delete-id="{session_id}" data-delete-title="{html.escape(title, quote=True)}">Delete video</button>
       </div>
