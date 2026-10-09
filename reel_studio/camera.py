@@ -150,10 +150,23 @@ class Camera:
         x0, y0 = box["x"], box["y"]
         return x0, y0, x0 + min(box["width"], usable_w), y0 + min(box["height"], usable_h)
 
-    def aim(self, box: dict, zoom: float) -> tuple[float, float]:
-        """The centre that frames a box at this zoom."""
-        x0, y0, x1, y1 = self._anchor(box, max(zoom, 1.0))
-        return (x0 + x1) / 2, (y0 + y1) / 2
+    def aim(self, box: dict, zoom: float, lead: bool = False) -> tuple[float, float]:
+        """The centre that frames a box at this zoom.
+
+        With ``lead`` the box starts AIM_PAD from the frame's left edge
+        instead of sitting in the middle: how a line of text is framed. A
+        short line near a page's left column, centred, pulled the frame
+        against the page edge and put the whole sidebar in a quarter of
+        every close-up (2026-10-09); led, the line opens the frame and the
+        page continues to its right.
+        """
+        zoom = max(zoom, 1.0)
+        x0, y0, x1, y1 = self._anchor(box, zoom)
+        cy = (y0 + y1) / 2
+        if lead:
+            view_w = self.width / zoom
+            return x0 - view_w * AIM_PAD + view_w / 2, cy
+        return (x0 + x1) / 2, cy
 
     def needs_follow(self, box: dict | None) -> tuple[float, float] | None:
         """The centre to pan to so a target is inside the view, if needed."""

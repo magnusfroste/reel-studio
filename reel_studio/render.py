@@ -330,6 +330,59 @@ def segmented_render_enabled() -> bool:
     }
 
 
+@dataclass(frozen=True)
+class Segment:
+    name: str
+    offset: float
+    source_duration: float
+    output_duration: float
+    clip: Path | None = None
+
+
+def plan_segments(
+    steps: Sequence[tuple[float, Path | None, float]],
+    video_duration: float,
+) -> tuple[list[Segment], list[dict]]:
+    """The windows of the recording a segmented render keeps, in order.
+
+    Each step keeps its narration (at least SEGMENT_FLOOR) plus a short tail,
+    and never more footage than there is before the next step; a step whose
+    narration outlasts its footage holds its last frame. The time between
+    steps, when an agent was thinking, is cut. Shared by the renderer and by
+    the length estimate a director sees while recording.
+    """
+    ordered = sorted(
+        (offset, clip, max(0.0, duration))
+        for offset, clip, duration in steps
+        if 0 <= offset < video_duration
+    )
+    segments: list[Segment] = []
+    warnings: list[dict] = []
+    if ordered and ordered[0][0] > 0:
+        lead = min(LEAD_IN_CAP, ordered[0][0])
+        segments.append(Segment("lead", 0.0, lead, lead))
+    for index, (offset, clip, narration_duration) in enumerate(ordered):
+        next_offset = (
+            ordered[index + 1][0] if index + 1 < len(ordered) else video_duration
+        )
+        available = max(0.0, next_offset - offset)
+        if available <= 0:
+            continue
+        target = max(narration_duration, SEGMENT_FLOOR) + SEGMENT_TAIL_PAD
+        keep_duration = min(available, target)
+        if narration_duration > available:
+            warnings.append({
+                "index": index,
+                "needed_seconds": round(narration_duration, 3),
+                "available_seconds": round(available, 3),
+            })
+            keep_duration = narration_duration + SEGMENT_TAIL_PAD
+        segments.append(Segment(
+            f"{index:04d}", offset, min(available, keep_duration), keep_duration, clip,
+        ))
+    return segments, warnings
+
+
 def segmented_render(
     video_path: Path,
     steps: Sequence[tuple[float, Path | None, float]],
@@ -343,11 +396,7 @@ def segmented_render(
     if camera is not None:
         output_size = camera.output_size(output_size)
     video_duration = probe_duration(video_path)
-    ordered = sorted(
-        (offset, clip, max(0.0, duration))
-        for offset, clip, duration in steps
-        if 0 <= offset < video_duration
-    )
+    segments, warnings = plan_segments(steps, video_duration)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".segments-", dir=output_path.parent
@@ -355,53 +404,23 @@ def segmented_render(
         temporary_path = Path(temporary)
         segment_paths: list[Path] = []
         audio_clips: list[tuple[float, Path]] = []
-        warnings: list[dict] = []
         cumulative = 0.0
 
-        if ordered and ordered[0][0] > 0:
-            lead = min(LEAD_IN_CAP, ordered[0][0])
-            segment_paths.append(
-                _render_video_segment(
-                    video_path, 0.0, lead, lead,
-                    temporary_path / "segment-lead.mp4",
-                    output_size, camera,
-                )
-            )
-            cumulative += lead
-
-        for index, (offset, clip, narration_duration) in enumerate(ordered):
-            next_offset = (
-                ordered[index + 1][0]
-                if index + 1 < len(ordered)
-                else video_duration
-            )
-            available = max(0.0, next_offset - offset)
-            if available <= 0:
-                continue
-            target = max(narration_duration, SEGMENT_FLOOR) + SEGMENT_TAIL_PAD
-            keep_duration = min(available, target)
-            if narration_duration > available:
-                warnings.append({
-                    "index": index,
-                    "needed_seconds": round(narration_duration, 3),
-                    "available_seconds": round(available, 3),
-                })
-                keep_duration = narration_duration + SEGMENT_TAIL_PAD
-            segment_path = temporary_path / f"segment-{index:04d}.mp4"
+        for segment in segments:
             segment_paths.append(
                 _render_video_segment(
                     video_path,
-                    offset,
-                    min(available, keep_duration),
-                    keep_duration,
-                    segment_path,
+                    segment.offset,
+                    segment.source_duration,
+                    segment.output_duration,
+                    temporary_path / f"segment-{segment.name}.mp4",
                     output_size,
                     camera,
                 )
             )
-            if clip is not None:
-                audio_clips.append((cumulative, clip))
-            cumulative += keep_duration
+            if segment.clip is not None:
+                audio_clips.append((cumulative, segment.clip))
+            cumulative += segment.output_duration
 
         if not segment_paths:
             segment_paths.append(

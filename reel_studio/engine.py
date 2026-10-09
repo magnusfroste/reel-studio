@@ -23,7 +23,9 @@ from playwright.async_api import (
 )
 
 from .render import (
+    CARD_DURATION,
     mux_narration,
+    plan_segments,
     probe_duration,
     segmented_render,
     segmented_render_enabled,
@@ -593,6 +595,7 @@ class BrowserSession:
         level = zoom if zoom is not None else FRAMING_ZOOM.get(framing, 1.0)
         level = max(1.0, level)
         box = None
+        box_is_text = False
         note = ""
         if level > 1.0:
             if focus_ref and focus_ref in self.refs and not self.refs_stale:
@@ -605,6 +608,7 @@ class BrowserSession:
                 target = await self._visible_text_target(focus_text, exact=False)
                 if target is not None:
                     box = await self._text_box(target, focus_text)
+                    box_is_text = True
             if box is None:
                 note = (
                     "No focus_ref or focus_text box on screen: the camera pushes in "
@@ -613,7 +617,9 @@ class BrowserSession:
         cx = cy = None
         if box:
             if self.camera is not None:
-                cx, cy = self.camera.aim(box, level)
+                # Words are read from their start: frame a text focus from
+                # its first word, not around its middle.
+                cx, cy = self.camera.aim(box, level, lead=box_is_text)
             else:
                 cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
         self.pending_shot = (level, cx, cy)
@@ -1029,13 +1035,29 @@ class BrowserSession:
         narrated = sum(probe_duration(clip) for _, clip, _ in self.narrations)
         return {
             "elapsed_seconds": round(elapsed, 3),
-            "recorded_steps": len(self.narrations),
+            "recorded_steps": len(self.timeline),
             "total_narrated_seconds": round(narrated, 3),
-            "estimated_video_length": round(max(elapsed, max(
-                (offset + probe_duration(clip) for offset, clip, _ in self.narrations),
-                default=0.0,
-            )), 3),
+            "estimated_video_length": round(self.estimated_length(elapsed), 3),
         }
+
+    def estimated_length(self, elapsed: float) -> float:
+        """How long the finished video will be if the session ends now.
+
+        It used to be the wall-clock time since start, which counts the
+        minutes an agent spends thinking between calls; those are cut from
+        the video. An agent read 800 s on a take that rendered at 92 s and
+        suspected its pauses were being recorded (2026-10-09). This is the
+        renderer's own plan for the steps so far, plus the title and
+        call-to-action cards.
+        """
+        if not segmented_render_enabled():
+            return elapsed
+        segments, _ = plan_segments(self.timeline, max(elapsed, 0.001))
+        cards = CARD_DURATION * (
+            bool(self.render_config.title.strip())
+            + bool(self.render_config.cta_url.strip())
+        )
+        return sum(segment.output_duration for segment in segments) + cards
 
     def _finish_media(self) -> Path:
         stop_recording(self.recorder)
