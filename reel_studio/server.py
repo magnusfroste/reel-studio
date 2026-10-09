@@ -888,6 +888,15 @@ def _resolve_output_size(
     return width, height
 
 
+def _title_background(value: str) -> str:
+    value = (value or "").strip()
+    if value.lower() in {"solid", "auto"}:
+        return value.lower()
+    if value.startswith("https://") and len(value) <= 2000:
+        return value
+    return "auto"
+
+
 def _render_config(
     title: str,
     subtitle: str,
@@ -896,6 +905,7 @@ def _render_config(
     cta_text: str,
     music: str,
     transitions: str = "smooth",
+    title_background: str = "auto",
 ) -> RenderConfig:
     normalized_accent = accent.strip()
     if not re.fullmatch(r"#?[0-9a-fA-F]{6}", normalized_accent):
@@ -913,6 +923,7 @@ def _render_config(
         cta_text=cta_text.strip() or "Learn more",
         music=normalized_music,
         transitions="cuts" if transitions.strip().lower() == "cuts" else "smooth",
+        title_background=_title_background(title_background),
     )
 
 
@@ -1319,6 +1330,9 @@ The screen records from start_session until finish, so plan first and record onc
    The voice is yours to choose: list_voices(language="en") lists them with
    their gender and personality; pass one as start_session(voice=...). It
    stays for the whole video.
+   The title and closing cards are a hero section by default: a still from
+   your own video, blurred and dimmed under the text (title_background="auto").
+   Pass an https image URL for a brand image, or "solid" for the accent colour.
    Joins between steps are chosen for you (transitions="smooth": a cut on a
    new page, a short dissolve where a cut would jump). transitions="cuts"
    makes every join a hard cut, for a brisker, more technical feel.
@@ -1448,6 +1462,12 @@ async def start_session(
                           "fades on the title and closing cards. cuts: every join a hard cut.",
               json_schema_extra={"enum": ["smooth", "cuts"]}),
     ] = "smooth",
+    title_background: Annotated[
+        str,
+        Field(description="Behind the title and closing cards. auto (default): a still from "
+                          "this video, blurred and dimmed under the text, like a hero section. "
+                          "solid: the accent colour. Or an https image URL (up to 10 MB)."),
+    ] = "auto",
     mask: Annotated[
         list[str] | None,
         Field(description="CSS selectors blurred on every page from the first frame, e.g. "
@@ -1493,7 +1513,7 @@ async def start_session(
     except ValueError as exc:
         return {"ok": False, "error": {"type": "invalid_mask", "message": str(exc)}}
     render_config = _render_config(
-        title, subtitle, accent, cta_url, cta_text, music, transitions
+        title, subtitle, accent, cta_url, cta_text, music, transitions, title_background
     )
     session = await BrowserSession.create(
         start_url, width, height, voice, selected_provider, selected_output_size,
@@ -1519,6 +1539,7 @@ async def start_session(
         render_config.cta_text,
         render_config.music,
         render_config.transitions,
+        render_config.title_background,
     )
     result: dict = {"session_id": session.session_id}
     if others:
@@ -1955,6 +1976,7 @@ async def rerender(session_id: str) -> dict:
         session.get("cta_text", "Learn more"),
         session.get("music", "none"),
         session.get("transitions") or "smooth",
+        session.get("title_background") or "auto",
     )
     video_duration = await asyncio.to_thread(probe_duration, source_video)
     render_pages: list[str] = []

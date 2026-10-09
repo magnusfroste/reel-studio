@@ -29,6 +29,10 @@ class RenderConfig:
     # "smooth": cut on page changes, dissolve where a cut would jump, fade the
     # cards. "cuts": every join a hard cut. See choose_transitions.
     transitions: str = "smooth"
+    # The title and closing cards' background: "auto" — a still from the
+    # video itself, blurred and dimmed under the text, like a hero section —
+    # "solid" (the accent colour), or an https image URL.
+    title_background: str = "auto"
 
 
 def start_recording(display: str, width: int, height: int, output: Path) -> subprocess.Popen[bytes]:
@@ -159,12 +163,97 @@ def wrap_card_text(text: str, max_chars: int = 28) -> list[str]:
     ) or [text]
 
 
+CARD_DIM = 0.4
+CARD_URL_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _still(video: Path, at_end: bool, output: Path) -> Path | None:
+    """One full-size frame from the start or the end of a video."""
+    try:
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y",
+             *(["-sseof", "-0.12"] if at_end else ["-ss", "0.3"]),
+             "-i", str(video), "-frames:v", "1", str(output)],
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        return None
+    return output if output.is_file() and output.stat().st_size else None
+
+
+def _public_https(url: str) -> bool:
+    """An https URL whose host resolves only to public addresses.
+
+    reel-studio runs beside other services on its host's network; fetching
+    whatever URL an agent names would let it reach those.
+    """
+    import ipaddress
+    import socket
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, 443)
+    except OSError:
+        return False
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if (address.is_private or address.is_loopback or address.is_link_local
+                or address.is_reserved or address.is_multicast):
+            return False
+    return True
+
+
+def _download_image(url: str, output: Path) -> Path | None:
+    import urllib.request
+
+    if not _public_https(url):
+        return None
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 reel-studio"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if not (response.headers.get("Content-Type") or "").startswith("image/"):
+                return None
+            data = response.read(CARD_URL_MAX_BYTES + 1)
+    except Exception:
+        return None
+    if not data or len(data) > CARD_URL_MAX_BYTES:
+        return None
+    output.write_bytes(data)
+    return output
+
+
+def card_backgrounds(
+    config: RenderConfig, first_video: Path, last_video: Path, temporary: Path,
+) -> tuple[Path | None, Path | None]:
+    """The images under the title card and the closing card, if any.
+
+    "auto" takes the first frame of the video for the title and its last
+    frame for the close — the product itself, as a hero image. An image URL
+    is used for both; one that cannot be fetched falls back to "auto".
+    """
+    choice = (config.title_background or "auto").strip()
+    if choice == "solid":
+        return None, None
+    if choice.startswith("https://"):
+        image = _download_image(choice, temporary / "card-background")
+        if image is not None:
+            return image, image
+    return (
+        _still(first_video, False, temporary / "card-first.png"),
+        _still(last_video, True, temporary / "card-last.png"),
+    )
+
+
 def _card(
     output_path: Path,
     width: int,
     height: int,
     accent: str,
     lines: Sequence[tuple[str, int]],
+    background: Path | None = None,
 ) -> None:
     if not Path(FONT_PATH).is_file():
         raise RuntimeError(f"Title-card font is missing: {FONT_PATH}")
@@ -179,8 +268,40 @@ def _card(
             "drawtext="
             f"fontfile={FONT_PATH}:text='{_escape_drawtext(text)}':"
             f"fontcolor=white:fontsize={size}:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2+{index * 1.4 - center_offset}*{size}"
+            + ("shadowcolor=black@0.55:shadowx=2:shadowy=2:" if background else "")
+            + f"x=(w-text_w)/2:y=(h-text_h)/2+{index * 1.4 - center_offset}*{size}"
         )
+    if background is not None:
+        # A hero section: the image fills the frame, drifts in a little over
+        # the card, and is blurred and dimmed just enough for the text to read
+        # on any image, with a soft shadow under the letters.
+        # A strip of the accent colour at the bottom keeps the brand.
+        frames = int(CARD_DURATION * 25)
+        hero = [
+            # The bottom band is where captions sit in a still from the video;
+            # it is cut off so a caption does not ghost through the title.
+            "crop=iw:ih*0.84:0:0",
+            f"scale={width}:{height}:force_original_aspect_ratio=increase",
+            f"crop={width}:{height}",
+            f"zoompan=z='1+0.05*on/{frames}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2'"
+            f":d={frames}:s={width}x{height}:fps=25",
+            f"boxblur={max(2, width // 320)}:2",
+            f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{CARD_DIM}:t=fill",
+            f"drawbox=x=0:y=ih-{max(4, height // 135)}:w=iw:h={max(4, height // 135)}:color={accent}@0.9:t=fill",
+        ]
+        result = subprocess.run(
+            [
+                "ffmpeg", "-loglevel", "error", "-y",
+                "-i", str(background),
+                "-vf", ",".join(hero + drawtext + ["format=yuv420p"]),
+                "-frames:v", str(frames), "-r", "25",
+                "-an", "-c:v", "libx264", "-preset", "veryfast",
+                "-pix_fmt", "yuv420p", str(output_path),
+            ],
+        )
+        if result.returncode == 0 and output_path.is_file():
+            return
+        # An image ffmpeg cannot read: the solid card below.
     subprocess.run(
         [
             "ffmpeg", "-loglevel", "error", "-y",
@@ -206,6 +327,10 @@ def _compose_video(
     temporary = body_path.parent
     parts: list[Path] = []
     intro_duration = 0.0
+    intro_background, outro_background = (
+        card_backgrounds(config, body_path, body_path, temporary)
+        if (config.title.strip() or config.cta_url.strip()) else (None, None)
+    )
     if config.title.strip():
         intro = temporary / "intro.mp4"
         _card(
@@ -214,6 +339,7 @@ def _compose_video(
              (config.subtitle.strip(), max(20, width // 48))]
             if config.subtitle.strip()
             else [(config.title.strip(), max(36, width // 22))],
+            intro_background,
         )
         parts.append(intro)
         intro_duration = CARD_DURATION
@@ -226,6 +352,7 @@ def _compose_video(
                 (config.cta_text.strip() or "Learn more", max(28, width // 32)),
                 (config.cta_url.strip(), max(22, width // 44)),
             ],
+            outro_background,
         )
         parts.append(outro)
     base = temporary / "branded-base.mp4"
@@ -594,6 +721,10 @@ def _assemble_smooth(
     width, height = output_size or probe_video_size(segment_paths[0])
     parts: list[tuple[Path, Path | None]] = []
     joins: list[float] = []
+    intro_background, outro_background = (
+        card_backgrounds(config, segment_paths[0], segment_paths[-1], temporary)
+        if (config.title.strip() or config.cta_url.strip()) else (None, None)
+    )
     if config.title.strip():
         intro = temporary / "intro.mp4"
         _card(
@@ -602,6 +733,7 @@ def _assemble_smooth(
              (config.subtitle.strip(), max(20, width // 48))]
             if config.subtitle.strip()
             else [(config.title.strip(), max(36, width // 22))],
+            intro_background,
         )
         parts.append((intro, None))
         joins.append(CARD_FADE)
@@ -615,6 +747,7 @@ def _assemble_smooth(
                 (config.cta_text.strip() or "Learn more", max(28, width // 32)),
                 (config.cta_url.strip(), max(22, width // 44)),
             ],
+            outro_background,
         )
         parts.append((outro, None))
         joins.append(CARD_FADE)

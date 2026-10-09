@@ -413,3 +413,13 @@ def test_offscreen_is_part_of_the_contract():
 
     assert Action(type="type", ref="r", text="x", offscreen=True).offscreen
     assert "offscreen" in action_json_schema()["properties"] and "offscreen" in ACTION_CONTRACT
+
+
+def test_title_background_is_validated(mods):
+    server, _, _ = mods
+    assert server._title_background("SOLID") == "solid"
+    assert server._title_background("https://example.com/hero.png") == "https://example.com/hero.png"
+    assert server._title_background("http://10.0.0.1/x.png") == "auto"
+    assert server._title_background("") == "auto"
+    props = _tools(server)["start_session"].inputSchema["properties"]
+    assert "title_background" in props
