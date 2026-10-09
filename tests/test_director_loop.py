@@ -341,3 +341,28 @@ def test_the_wait_for_a_slow_answer_is_configurable():
     with pytest.raises(ValidationError):
         Action(type="click", ref="r", wait_timeout_ms=600000)
     assert "wait_timeout_ms" in action_json_schema()["properties"]
+
+
+def test_a_quiet_step_is_not_flagged_as_silent(mods):
+    server, store, _ = mods
+    _new_session(store, "s-quiet-step")
+    store.append_step("s-quiet-step", "caption", None, "https://example.com", "Shop",
+                      "Signing in.", 1.5, 0.0, None, True, None)
+    store.append_step("s-quiet-step", "click", "button:sign-in", "https://example.com", "Shop",
+                      "", 0.0, 2.0, None, True, None, quiet=True)
+    store.append_step("s-quiet-step", "click", "button:other", "https://example.com", "Shop",
+                      "", 0.0, 3.0, None, True, None)
+    review = asyncio.run(server.review_session("s-quiet-step"))
+    flagged = [f["location"] for f in review["findings"] if f["category"] == "focus_narration_alignment"]
+    assert flagged == ["step[2]"]
+    assert store.get_session("s-quiet-step")["steps"][1]["quiet"] == 1
+
+
+def test_quiet_silences_the_warning_and_sticky_is_a_caption_option():
+    from reel_studio.schema import ACTION_CONTRACT, Action, action_json_schema
+
+    assert Action(type="caption", text="x", sticky=True).sticky
+    assert Action(type="click", ref="r", quiet=True).quiet
+    props = action_json_schema()["properties"]
+    assert "sticky" in props and "quiet" in props
+    assert "sticky" in ACTION_CONTRACT and "quiet" in ACTION_CONTRACT

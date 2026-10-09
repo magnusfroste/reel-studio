@@ -152,8 +152,11 @@ def caption_script() -> str:
   }
   const old = root.querySelector(`[data-annotation-id="${spec.id}"]`);
   if (old) old.remove();
+  // A caption replaces any sticky one still on screen.
+  root.querySelectorAll("[data-reel-sticky]").forEach((el) => el.remove());
   const group = document.createElement("div");
   group.dataset.annotationId = spec.id;
+  if (spec.sticky) group.dataset.reelSticky = "1";
   const caption = document.createElement("div");
   caption.setAttribute("aria-label", spec.label);
   caption.textContent = spec.label;
@@ -182,7 +185,7 @@ def caption_script() -> str:
   }
   group.appendChild(caption);
   root.appendChild(group);
-  setTimeout(() => group.remove(), spec.duration_ms);
+  if (!spec.sticky) setTimeout(() => group.remove(), spec.duration_ms);
 }
 """
 
