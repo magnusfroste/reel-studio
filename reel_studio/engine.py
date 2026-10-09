@@ -699,6 +699,16 @@ class BrowserSession:
         if self.camera is None:
             return
         try:
+            # A link to another page: the click ends this shot, and a pan to
+            # it — to a sidebar entry, usually — only showed as a half-second
+            # drift before the cut (2026-10-09).
+            if await target.evaluate(
+                "(el) => { const a = el.closest('a[href]'); if (!a) return false;"
+                " const to = new URL(a.href, location.href);"
+                " return to.origin + to.pathname + to.search"
+                "   !== location.origin + location.pathname + location.search; }"
+            ):
+                return
             box = await target.bounding_box()
         except PlaywrightError:
             return
@@ -1004,11 +1014,22 @@ class BrowserSession:
             action_finished_at = time.monotonic() - self.t0
             if self.page.url != before_url:
                 self.refs_stale = True
-                # A new page: whatever the camera framed is gone. Back to wide.
+                # A new page: whatever the camera framed is gone. Back to
+                # wide, as a cut: the new page is a cut in the video too, and
+                # an eased zoom-out showed its first second at the old zoom.
                 if self.camera is not None:
-                    self.camera.move(action_finished_at, 1.0)
-                # And so is a sticky caption: it lived in the old page.
+                    self.camera.move(action_finished_at, 1.0, ease=0.0)
+                # A sticky caption belonged to the old page. In a single-page
+                # app the old page's DOM — and the caption — survives the
+                # navigation, so it is removed rather than forgotten.
                 self.sticky_caption = None
+                try:
+                    await self.page.evaluate(
+                        "() => document.querySelectorAll('[data-reel-sticky]')"
+                        ".forEach((el) => el.remove())"
+                    )
+                except PlaywrightError:
+                    pass
             try:
                 await self.page.wait_for_load_state("domcontentloaded", timeout=2000)
             except PlaywrightTimeoutError:

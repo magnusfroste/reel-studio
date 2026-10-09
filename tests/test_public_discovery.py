@@ -109,3 +109,18 @@ def test_watch_page_tolerates_legacy_step_types(monkeypatch):
     assert html is not None
     assert "Step 1: 123 456" in html
     assert "2.5s" in html
+
+
+def test_watch_and_theater_pages_offer_a_share_link(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("REEL_DB_PATH", str(tmp_path / "share.db"))
+    from reel_studio import server, store
+
+    store.init_schema()
+    store.create_session("abc123", "https://example.com", "en-US-JennyNeural", 1920, 1080,
+                         str(tmp_path), "edge", None, None, "Demo", "", "#1f2a44", "", "Learn more", "none")
+    store.finish_session("abc123", str(tmp_path / "video.mp4"), None, 12.0)
+    watch = server.watch_page("abc123")
+    assert 'data-share-path="/watch/abc123"' in watch
+    assert "navigator.clipboard.writeText" in watch
+    assert 'data-share-path="/watch/abc123"' in server.theater_page()
