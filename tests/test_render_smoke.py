@@ -180,3 +180,24 @@ def test_smooth_assembly_overlaps_and_keeps_the_narration(tmp_path):
                 - render.CARD_FADE - render.TIME_DISSOLVE - render.CARD_FADE)
     assert render.probe_duration(out) == pytest.approx(expected, abs=0.15)
     assert _has_stream(out, "a")
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+def test_a_hero_card_is_built_on_a_still_from_the_video(tmp_path):
+    video = _clip(tmp_path / "v.mp4", "teal", 1.0, "640x360")
+    config = render.RenderConfig(title="Hero", cta_url="https://example.com")
+    first, last = render.card_backgrounds(config, video, video, tmp_path)
+    assert first is not None and last is not None
+    card = tmp_path / "card.mp4"
+    render._card(card, 640, 360, "#3b82f6", [("Hero", 36)], first)
+    assert render.probe_duration(card) == pytest.approx(render.CARD_DURATION, abs=0.1)
+    assert render.probe_video_size(card) == (640, 360)
+    solid = render.RenderConfig(title="Hero", title_background="solid")
+    assert render.card_backgrounds(solid, video, video, tmp_path) == (None, None)
+
+
+def test_only_public_https_images_are_fetched():
+    assert not render._public_https("http://example.com/a.png")
+    assert not render._public_https("https://127.0.0.1/a.png")
+    assert not render._public_https("https://localhost/a.png")
+    assert not render._public_https("file:///etc/passwd")

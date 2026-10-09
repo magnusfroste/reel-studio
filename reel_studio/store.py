@@ -147,6 +147,7 @@ def init_schema() -> None:
             ("cta_text", "TEXT NOT NULL DEFAULT 'Learn more'"),
             ("music", "TEXT NOT NULL DEFAULT 'none'"),
             ("transitions", "TEXT NOT NULL DEFAULT 'smooth'"),
+            ("title_background", "TEXT NOT NULL DEFAULT 'auto'"),
         ):
             if column not in session_columns:
                 connection.execute(
@@ -198,6 +199,7 @@ def create_session(
     cta_text: str = "Learn more",
     music: str = "none",
     transitions: str = "smooth",
+    title_background: str = "auto",
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
@@ -206,13 +208,13 @@ def create_session(
             INSERT INTO sessions
                 (id, start_url, status, voice, provider, width, height,
                  output_width, output_height, title, subtitle, accent, cta_url,
-                 cta_text, music, created_at, output_dir, transitions)
-            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 cta_text, music, created_at, output_dir, transitions, title_background)
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id, _safe_persisted_url(start_url), voice, provider, width, height,
                 output_width, output_height, title, subtitle, accent, cta_url,
-                cta_text, music, _now(), output_dir, transitions,
+                cta_text, music, _now(), output_dir, transitions, title_background,
             ),
         )
 
