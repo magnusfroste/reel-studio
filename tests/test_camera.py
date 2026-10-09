@@ -131,3 +131,41 @@ def test_segment_keeps_its_padding_and_renders_the_camera(tmp_path):
     # The tpad frames used to be cut off by an output-side -t.
     assert render.probe_duration(segment) == pytest.approx(2.5, abs=0.08)
     assert render.probe_video_size(segment) == (240, 132)
+
+
+def test_a_line_of_text_is_framed_from_its_first_word():
+    camera = Camera(1920, 1080)
+    # "The model answered" just right of a 260 px sidebar.
+    line = {"x": 400, "y": 640, "width": 180, "height": 20}
+    centred = camera.view((2.0, *camera.aim(line, 2.0)))
+    led = camera.view((2.0, *camera.aim(line, 2.0, lead=True)))
+    assert centred["x"] < 260  # centred, the sidebar is in the frame
+    assert 260 < led["x"] < 400  # led: the sidebar is out, the line opens the frame
+    assert led["x"] == pytest.approx(400 - 960 * 0.08)
+
+
+def test_plan_segments_cuts_the_thinking_time():
+    steps = [(10.0, None, 2.0), (40.0, None, 0.0), (41.0, None, 5.0)]
+    segments, warnings = render.plan_segments(steps, 100.0)
+    assert [s.name for s in segments] == ["lead", "0000", "0001", "0002"]
+    assert segments[0].output_duration == 1.0  # lead-in capped
+    assert segments[1].output_duration == pytest.approx(2.4)  # narration + tail, not 30 s
+    assert segments[2].output_duration == pytest.approx(1.0)  # floor, capped by the next step
+    assert segments[3].output_duration == pytest.approx(5.4)
+    assert warnings == []
+    held, warnings = render.plan_segments([(0.0, None, 3.0), (1.0, None, 0.0)], 5.0)
+    assert held[0].source_duration == 1.0 and held[0].output_duration == pytest.approx(3.4)
+    assert warnings[0]["needed_seconds"] == 3.0
+
+
+def test_the_length_estimate_is_the_render_plan_not_the_clock():
+    from types import SimpleNamespace
+    from reel_studio.engine import BrowserSession
+    from reel_studio.render import CARD_DURATION, RenderConfig
+
+    fake = SimpleNamespace(
+        timeline=[(10.0, None, 2.0), (400.0, None, 3.0)],
+        render_config=RenderConfig(title="T", cta_url="https://example.com"),
+    )
+    estimate = BrowserSession.estimated_length(fake, 800.0)
+    assert estimate == pytest.approx(1.0 + 2.4 + 3.4 + 2 * CARD_DURATION)

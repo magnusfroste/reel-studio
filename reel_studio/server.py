@@ -1297,9 +1297,17 @@ The screen records from start_session until finish, so plan first and record onc
      push in medium on it before the click, not wide. A line about a result is
      a close on the result.
    - The focus must be on screen when you call begin_shot: scroll it into view
-     first. Prefer focus_ref; focus_text takes the first visible match, which
-     can be a sidebar entry with the same words. Check the reply's
+     first. focus_text frames a line from its first word — right for a result,
+     a version line, a heading; it takes the first visible match, so pick words
+     that appear once (a card's own description, not its title that the
+     sidebar repeats). focus_ref centres an element — right for a button. A
+     card has no ref of its own: use a line of its text. Check the reply's
      camera_centre; camera_note means the focus was not found.
+   - A medium frame shows two thirds of the page width: a heading and a button
+     at opposite ends of a wide card do not both fit. Frame the one the voice
+     is talking about.
+   - get_status's estimated_video_length is the length of the video so far:
+     the time between your calls is cut, so it does not count.
    - verify_shot right after its beat. A shot can be declared again with the
      same shot_id to correct it.
 8. Keep secrets unreadable: start_session(mask=[CSS selectors]) blurs matching
