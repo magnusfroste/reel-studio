@@ -183,9 +183,16 @@ def caption_script() -> str:
       maxWidth: `${Math.min(900, v.w * v.zoom - 64)}px`
     });
   }
+  const delay = spec.delay_ms || 0;
+  if (delay) {
+    // The camera is moving to this caption's frame: show it once it lands.
+    caption.style.opacity = "0";
+    caption.style.transition = "opacity 200ms ease";
+    setTimeout(() => { caption.style.opacity = "1"; }, delay);
+  }
   group.appendChild(caption);
   root.appendChild(group);
-  if (!spec.sticky) setTimeout(() => group.remove(), spec.duration_ms);
+  if (!spec.sticky) setTimeout(() => group.remove(), spec.duration_ms + delay);
 }
 """
 
