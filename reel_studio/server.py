@@ -888,6 +888,18 @@ def _resolve_output_size(
     return width, height
 
 
+def step_hold_seconds(step: dict, narration_duration: float) -> float:
+    """How long a step holds in the video: the longer of its narration and
+    its caption or annotation, as when it was recorded.
+
+    rerender used the narration alone, so every caption held longer than its
+    line was cut back to the line: a 73.8 s take came back at 67.2 s with the
+    holds gone (2026-10-09). The caption's own length is stored with the step
+    now; a step recorded before that has none, and keeps the old behaviour.
+    """
+    return max(narration_duration, float(step.get("annotation_seconds") or 0.0))
+
+
 def _title_background(value: str) -> str:
     value = (value or "").strip()
     if value.lower() in {"solid", "auto"}:
@@ -1661,6 +1673,7 @@ async def _run_action(
         session.voice,
         parsed_action.quiet,
         parsed_action.offscreen,
+        payload.get("annotation_duration") or 0.0,
     )
     return payload, screenshot
 
@@ -2004,7 +2017,7 @@ async def rerender(session_id: str) -> dict:
             duration = float(step.get("narration_duration") or 0.0)
         if step.get("offscreen"):
             continue
-        render_steps.append((offset, clip, duration))
+        render_steps.append((offset, clip, step_hold_seconds(step, duration)))
         render_pages.append(step.get("url") or "")
         render_floors.append(QUIET_FLOOR if step.get("quiet") else SEGMENT_FLOOR)
     if segmented_render_enabled():

@@ -423,3 +423,36 @@ def test_title_background_is_validated(mods):
     assert server._title_background("") == "auto"
     props = _tools(server)["start_session"].inputSchema["properties"]
     assert "title_background" in props
+
+
+@pytest.mark.skipif(__import__("shutil").which("ffmpeg") is None, reason="ffmpeg is required")
+def test_a_caption_hold_survives_a_rerender(mods, monkeypatch, tmp_path):
+    server, store, _ = mods
+    import subprocess
+    from types import SimpleNamespace
+
+    session_dir = tmp_path / "s-hold"
+    session_dir.mkdir()
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=64x36:r=25:d=6", "-pix_fmt", "yuv420p",
+                    str(session_dir / "screen.mp4")], check=True)
+    (session_dir / "video.mp4").write_bytes((session_dir / "screen.mp4").read_bytes())
+    store.create_session("s-hold", "https://example.com", "en-US-JennyNeural", 64, 36,
+                         str(session_dir), "edge", None, None, "", "", "#1f2a44", "", "Learn more", "none")
+    store.append_step("s-hold", "caption", None, "https://example.com", "t", "", 0.0, 1.0,
+                      None, True, None, annotation_seconds=3.5)
+    store.append_step("s-hold", "click", "button:x", "https://example.com", "t", "", 0.0, 5.0,
+                      None, True, None)
+    store.finish_session("s-hold", str(session_dir / "video.mp4"), None, 5.0)
+    assert store.get_session("s-hold")["steps"][0]["annotation_seconds"] == 3.5
+
+    captured = {}
+
+    def fake_render(source, steps, video_path, *args, **kwargs):
+        captured["steps"] = steps
+        return SimpleNamespace(warnings=[], duration=4.9)
+
+    monkeypatch.setattr(server, "segmented_render", fake_render)
+    result = asyncio.run(server.rerender("s-hold"))
+    assert result["ok"]
+    assert [round(hold, 2) for _, _, hold in captured["steps"]] == [3.5, 0.0]
