@@ -146,3 +146,37 @@ def test_render_paths(media_dir, tmp_path):
         rerendered,
     )
     _assert_playable(rerendered)
+
+
+def _clip(path, colour, seconds=1.0, size="320x176"):
+    _run_ffmpeg("-f", "lavfi", "-i", f"color=c={colour}:s={size}:r=25:d={seconds}",
+                "-pix_fmt", "yuv420p", str(path))
+    return path
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+def test_transitions_cut_on_a_new_page_and_dissolve_a_jump(tmp_path):
+    a = _clip(tmp_path / "a.mp4", "black")
+    b = _clip(tmp_path / "b.mp4", "black")
+    c = _clip(tmp_path / "c.mp4", "white")
+    d = _clip(tmp_path / "d.mp4", "gray")
+    pages = ["https://x/1", "https://x/1", "https://x/1", "https://x/2"]
+    choices = render.choose_transitions([a, b, c, d], pages, tmp_path)
+    assert choices[0] == 0.0  # nothing visible changed: a cut
+    assert choices[1] == render.TIME_DISSOLVE  # black to white on one page
+    assert choices[2] == 0.0  # a new page: a cut, however different
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+def test_smooth_assembly_overlaps_and_keeps_the_narration(tmp_path):
+    a = _clip(tmp_path / "a.mp4", "black", 2.0)
+    b = _clip(tmp_path / "b.mp4", "white", 2.0)
+    voice = tmp_path / "voice.m4a"
+    _run_ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(voice))
+    out = tmp_path / "out.mp4"
+    config = render.RenderConfig(title="T", cta_url="https://example.com")
+    render._assemble_smooth([a, b], ["p", "p"], [None, voice], out, (320, 176), config, tmp_path)
+    expected = (render.CARD_DURATION + 2 + 2 + render.CARD_DURATION
+                - render.CARD_FADE - render.TIME_DISSOLVE - render.CARD_FADE)
+    assert render.probe_duration(out) == pytest.approx(expected, abs=0.15)
+    assert _has_stream(out, "a")

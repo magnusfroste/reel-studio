@@ -3,10 +3,11 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import tempfile
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Sequence, cast
 import textwrap
 
 if TYPE_CHECKING:
@@ -25,6 +26,9 @@ class RenderConfig:
     cta_url: str = ""
     cta_text: str = "Learn more"
     music: str = "none"
+    # "smooth": cut on page changes, dissolve where a cut would jump, fade the
+    # cards. "cuts": every join a hard cut. See choose_transitions.
+    transitions: str = "smooth"
 
 
 def start_recording(display: str, width: int, height: int, output: Path) -> subprocess.Popen[bytes]:
@@ -337,6 +341,9 @@ class Segment:
     source_duration: float
     output_duration: float
     clip: Path | None = None
+    # Position of the step in the steps given to plan_segments; None for the
+    # lead-in.
+    step_index: int | None = None
 
 
 def plan_segments(
@@ -352,8 +359,8 @@ def plan_segments(
     the length estimate a director sees while recording.
     """
     ordered = sorted(
-        (offset, clip, max(0.0, duration))
-        for offset, clip, duration in steps
+        (offset, index, clip, max(0.0, duration))
+        for index, (offset, clip, duration) in enumerate(steps)
         if 0 <= offset < video_duration
     )
     segments: list[Segment] = []
@@ -361,7 +368,7 @@ def plan_segments(
     if ordered and ordered[0][0] > 0:
         lead = min(LEAD_IN_CAP, ordered[0][0])
         segments.append(Segment("lead", 0.0, lead, lead))
-    for index, (offset, clip, narration_duration) in enumerate(ordered):
+    for index, (offset, step_index, clip, narration_duration) in enumerate(ordered):
         next_offset = (
             ordered[index + 1][0] if index + 1 < len(ordered) else video_duration
         )
@@ -379,6 +386,7 @@ def plan_segments(
             keep_duration = narration_duration + SEGMENT_TAIL_PAD
         segments.append(Segment(
             f"{index:04d}", offset, min(available, keep_duration), keep_duration, clip,
+            step_index,
         ))
     return segments, warnings
 
@@ -390,8 +398,14 @@ def segmented_render(
     output_size: tuple[int, int] | None = None,
     config: RenderConfig | None = None,
     camera: "Camera | None" = None,
+    pages: Sequence[str] | None = None,
 ) -> SegmentedRenderResult:
-    """Render kept step windows from the original continuous recording."""
+    """Render kept step windows from the original continuous recording.
+
+    ``pages`` is the URL each step ended on, in the order of ``steps``; with
+    transitions "smooth" it tells a page change (a hard cut) from a jump on
+    the same page (a dissolve).
+    """
     config = config or RenderConfig()
     if camera is not None:
         output_size = camera.output_size(output_size)
@@ -403,10 +417,16 @@ def segmented_render(
     ) as temporary:
         temporary_path = Path(temporary)
         segment_paths: list[Path] = []
+        segment_pages: list[str | None] = []
         audio_clips: list[tuple[float, Path]] = []
         cumulative = 0.0
 
         for segment in segments:
+            segment_pages.append(
+                pages[segment.step_index]
+                if pages is not None and segment.step_index is not None
+                and segment.step_index < len(pages) else None
+            )
             segment_paths.append(
                 _render_video_segment(
                     video_path,
@@ -432,6 +452,14 @@ def segmented_render(
             )
             cumulative = video_duration
 
+        if config.transitions == "smooth" and segment_paths and len(segments) > 0:
+            _assemble_smooth(
+                segment_paths, segment_pages,
+                [segment.clip for segment in segments],
+                output_path, output_size, config, temporary_path,
+            )
+            return SegmentedRenderResult(output_path, probe_duration(output_path), warnings)
+
         joined = temporary_path / "joined.mp4"
         concat_list = temporary_path / "segments.txt"
         concat_list.write_text(
@@ -453,6 +481,153 @@ def segmented_render(
         else:
             _mux_segment_audio(joined, audio_clips, output_path, cumulative)
     return SegmentedRenderResult(output_path, probe_duration(output_path), warnings)
+
+
+SOFT_DISSOLVE = 0.25
+TIME_DISSOLVE = 0.5
+CARD_FADE = 0.5
+# A one-frame xfade: a cut, inside the same filter chain as the dissolves.
+CUT_FRAME = 0.04
+# PSNR of the frames either side of a join: above this nothing visible
+# changed; below the lower bound the picture changed a lot (a result arrived,
+# a panel opened) and the join reads as time passing.
+SAME_PICTURE_DB = 40.0
+BIG_CHANGE_DB = 24.0
+
+
+def _edge_frame(video: Path, at_end: bool, directory: Path) -> Path:
+    frame = directory / f"{video.stem}.{'end' if at_end else 'start'}.png"
+    if not frame.exists():
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y",
+             *(["-sseof", "-0.08"] if at_end else []), "-i", str(video),
+             "-frames:v", "1", "-vf", "scale=480:270,format=gray", str(frame)],
+            check=True,
+        )
+    return frame
+
+
+def _psnr(first: Path, second: Path) -> float:
+    result = subprocess.run(
+        ["ffmpeg", "-i", str(first), "-i", str(second), "-lavfi", "psnr", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    found = re.search(r"average:(inf|[\d.]+)", result.stderr)
+    if not found or found.group(1) == "inf":
+        return 99.0
+    return float(found.group(1))
+
+
+def choose_transitions(
+    segment_paths: Sequence[Path],
+    pages: Sequence[str | None],
+    directory: Path,
+) -> list[float]:
+    """The dissolve before each segment after the first (0 means a cut).
+
+    The rules an editor would use, applied the same way every time, so a
+    video never fills up with effects:
+
+    - a new page is a hard cut — the cut lands on the action that opened it;
+    - on the same page, a join where nothing visible changed stays a cut;
+    - a small jump on the same page (a counter ticked, a panel shifted while
+      the director was thinking) gets a 0.25 s dissolve that reads as no
+      effect at all, just no jolt;
+    - a big change on the same page (a result arrived) gets 0.5 s, which
+      reads as time passing.
+
+    Chosen from A/B renders of the same take, 2026-10-09.
+    """
+    choices: list[float] = []
+    for index in range(1, len(segment_paths)):
+        before, after = pages[index - 1], pages[index]
+        if before and after and before != after:
+            choices.append(0.0)
+            continue
+        similarity = _psnr(
+            _edge_frame(segment_paths[index - 1], True, directory),
+            _edge_frame(segment_paths[index], False, directory),
+        )
+        if similarity >= SAME_PICTURE_DB:
+            choices.append(0.0)
+        elif similarity >= BIG_CHANGE_DB:
+            choices.append(SOFT_DISSOLVE)
+        else:
+            choices.append(TIME_DISSOLVE)
+    return choices
+
+
+def _assemble_smooth(
+    segment_paths: Sequence[Path],
+    pages: Sequence[str | None],
+    clips: Sequence[Path | None],
+    output_path: Path,
+    output_size: tuple[int, int] | None,
+    config: RenderConfig,
+    temporary: Path,
+) -> None:
+    """Join segments and cards in one xfade chain, then lay the narration on.
+
+    Each dissolve overlaps two parts, so every later part — and its
+    narration — starts that much earlier; offsets are tracked as the chain is
+    built.
+    """
+    width, height = output_size or probe_video_size(segment_paths[0])
+    parts: list[tuple[Path, Path | None]] = []
+    joins: list[float] = []
+    if config.title.strip():
+        intro = temporary / "intro.mp4"
+        _card(
+            intro, width, height, config.accent,
+            [(config.title.strip(), max(36, width // 22)),
+             (config.subtitle.strip(), max(20, width // 48))]
+            if config.subtitle.strip()
+            else [(config.title.strip(), max(36, width // 22))],
+        )
+        parts.append((intro, None))
+        joins.append(CARD_FADE)
+    parts.extend(zip(segment_paths, clips))
+    joins.extend(choose_transitions(segment_paths, pages, temporary))
+    if config.cta_url.strip():
+        outro = temporary / "outro.mp4"
+        _card(
+            outro, width, height, config.accent,
+            [
+                (config.cta_text.strip() or "Learn more", max(28, width // 32)),
+                (config.cta_url.strip(), max(22, width // 44)),
+            ],
+        )
+        parts.append((outro, None))
+        joins.append(CARD_FADE)
+
+    command = ["ffmpeg", "-loglevel", "error", "-y"]
+    for path, _ in parts:
+        command += ["-i", str(path)]
+    chain: list[str] = []
+    label = "[0:v]"
+    end = probe_duration(parts[0][0])
+    audio: list[tuple[float, Path]] = []
+    if parts[0][1] is not None:
+        audio.append((0.0, parts[0][1]))
+    for index in range(1, len(parts)):
+        overlap = joins[index - 1] or CUT_FRAME
+        start = max(0.0, end - overlap)
+        chain.append(
+            f"{label}[{index}:v]xfade=transition=fade:duration={overlap:.3f}"
+            f":offset={start:.3f}[v{index}]"
+        )
+        label = f"[v{index}]"
+        if parts[index][1] is not None:
+            audio.append((start, cast(Path, parts[index][1])))
+        end = start + probe_duration(parts[index][0])
+    body = temporary / "smooth.mp4"
+    command += (
+        ["-filter_complex", ";".join(chain), "-map", label] if chain else ["-map", "0:v"]
+    )
+    command += ["-an", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                "-r", "25", str(body)]
+    subprocess.run(command, check=True)
+    _mux_segment_audio(body, audio, output_path, end, config.music)
 
 
 def _render_video_segment(
