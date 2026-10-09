@@ -128,6 +128,10 @@ def init_schema() -> None:
             connection.execute(
                 "ALTER TABLE steps ADD COLUMN offscreen INTEGER NOT NULL DEFAULT 0"
             )
+        if "annotation_seconds" not in columns:
+            connection.execute(
+                "ALTER TABLE steps ADD COLUMN annotation_seconds REAL NOT NULL DEFAULT 0"
+            )
         session_columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
@@ -234,6 +238,7 @@ def append_step(
     voice: str | None = None,
     quiet: bool = False,
     offscreen: bool = False,
+    annotation_seconds: float = 0.0,
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
@@ -246,8 +251,8 @@ def append_step(
             INSERT INTO steps
                 (session_id, idx, action_type, target, url, title, narration_text,
                  voice, narration_duration, offset_seconds, screenshot_path, ok,
-                 error_type, created_at, quiet, offscreen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 error_type, created_at, quiet, offscreen, annotation_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -266,6 +271,7 @@ def append_step(
                 _now(),
                 int(quiet),
                 int(offscreen),
+                float(annotation_seconds or 0.0),
             ),
         )
 
