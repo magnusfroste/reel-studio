@@ -169,3 +169,15 @@ def test_the_length_estimate_is_the_render_plan_not_the_clock():
     )
     estimate = BrowserSession.estimated_length(fake, 800.0)
     assert estimate == pytest.approx(1.0 + 2.4 + 3.4 + 2 * CARD_DURATION)
+
+
+def test_a_shot_moves_the_camera_where_its_footage_starts():
+    """The move is keyed to the step's video offset (after the action settled),
+    not to when the act call began: that stretch is cut from the video, and a
+    push-in eased there reached the video as a jump."""
+    import inspect
+    from reel_studio.engine import BrowserSession
+
+    source = inspect.getsource(BrowserSession.act)
+    applied = source.index("self.camera.move(offset, *self.pending_shot)")
+    assert applied > source.index("offset = action_completed_at")

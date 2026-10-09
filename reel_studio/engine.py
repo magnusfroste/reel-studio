@@ -718,15 +718,45 @@ class BrowserSession:
             await self.page.evaluate(
                 caption_script(),
                 {"id": caption_id, "label": label, "duration_ms": 0,
-                 "sticky": True, "view": self._caption_view()},
+                 "sticky": True, "view": self._caption_view(),
+                 "delay_ms": int(EASE_SECONDS * 1000)},
             )
         except PlaywrightError:
             self.sticky_caption = None
 
+    def _shot_moves_camera(self) -> bool:
+        if self.camera is None or self.pending_shot is None:
+            return False
+        level, cx, cy = self.pending_shot
+        current = self.camera.final_state()
+        target = (max(level, 1.0),
+                  current[1] if cx is None else cx,
+                  current[2] if cy is None else cy)
+        if target[0] == 1.0 and current[0] == 1.0:
+            return False
+        return any(abs(a - b) > 0.5 for a, b in
+                   zip(self.camera.view(target).values(), self.camera.view(current).values()))
+
     def _caption_view(self) -> dict | None:
+        """The frame a caption drawn now will be seen in.
+
+        A declared shot moves the camera when its step's footage starts, so a
+        caption on that step belongs to the shot's frame, not the current one.
+        """
         if self.camera is None:
             return None
-        view = self.camera.view()
+        if self.pending_shot is not None:
+            level, cx, cy = self.pending_shot
+            _, current_cx, current_cy = self.camera.final_state()
+            if level <= 1.0:
+                return None
+            view = self.camera.view((
+                level,
+                current_cx if cx is None else cx,
+                current_cy if cy is None else cy,
+            ))
+        else:
+            view = self.camera.view()
         return view if view["zoom"] > 1.0 else None
 
     async def assert_visible(self, text: str) -> dict:
@@ -772,10 +802,6 @@ class BrowserSession:
                 "stale_refs",
                 "Element refs are stale; call observe again before using a ref.",
             )
-        if self.pending_shot is not None and self.camera is not None:
-            if self.camera.move(offset, *self.pending_shot):
-                await self._redraw_sticky_caption()
-            self.pending_shot = None
         if narration:
             try:
                 clip = await synthesize(
@@ -795,11 +821,20 @@ class BrowserSession:
                     return await self.error_result("invalid_action", "caption duration must be 30000 ms or less")
                 self.annotation_counter += 1
                 live_annotation_id = annotation_id("caption", self.annotation_counter)
-                annotation_duration = duration_ms / 1000
+                # A shot declared for this step moves the camera when its
+                # footage starts, after the settle. Drawn for the new frame
+                # straight away, the caption showed at half size and grew with
+                # the zoom; it appears once the move has landed instead.
+                delay_ms = (
+                    action.settle_ms + int(EASE_SECONDS * 1000)
+                    if self._shot_moves_camera() else 0
+                )
+                annotation_duration = (duration_ms + delay_ms) / 1000
                 await self.page.evaluate(
                     caption_script(),
                     {"id": live_annotation_id, "label": label, "duration_ms": duration_ms,
-                     "sticky": action.sticky, "view": self._caption_view()},
+                     "sticky": action.sticky, "view": self._caption_view(),
+                     "delay_ms": delay_ms},
                 )
                 # Any caption replaces a sticky one.
                 self.sticky_caption = (live_annotation_id, label) if action.sticky else None
@@ -1027,6 +1062,16 @@ class BrowserSession:
             # TTS is prepared before the browser action; align narration with
             # the settled visual state rather than with synthesis start.
             offset = action_completed_at
+        if self.pending_shot is not None and self.camera is not None:
+            # The shot's move starts where this step's footage starts in the
+            # video: at its narration, after the action has settled. Timed
+            # from the start of the act call, it eased during the action and
+            # the settle — footage the segmented render cuts — so most
+            # push-ins reached the video as a jump to the zoomed frame, not a
+            # move (found comparing cut boundaries, 2026-10-09).
+            if self.camera.move(offset, *self.pending_shot):
+                await self._redraw_sticky_caption()
+            self.pending_shot = None
         hold_duration = annotation_hold_seconds(duration, annotation_duration)
         if clip:
             self.narrations.append((offset, clip, narration))
