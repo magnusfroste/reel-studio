@@ -258,6 +258,9 @@ class BrowserSession:
     # A shot declared by begin_shot; the camera moves when its first step
     # starts, since the time between tool calls is cut from the video.
     pending_shot: tuple[float, float | None, float | None] | None = None
+    # A sticky caption on screen: (annotation id, label), redrawn when the
+    # camera moves so it stays inside the frame.
+    sticky_caption: tuple[str, str] | None = None
 
     @classmethod
     async def create(
@@ -306,6 +309,12 @@ class BrowserSession:
         # A persistent context has no separate Browser; closing the context
         # closes the browser, which is what _close_runtime needs.
         browser = context
+        # Chrome's own "Please fill out this field" bubble showed over a
+        # login form while an agent's hook caption played (2026-10-09). It is
+        # browser chrome, not page content; validation itself still runs.
+        await context.add_init_script(
+            "document.addEventListener('invalid', (e) => e.preventDefault(), true);"
+        )
         if mask_css:
             # Applied by the browser before any page script runs, on every page
             # and frame, so a masked element is blurred from its first frame —
@@ -624,6 +633,15 @@ class BrowserSession:
                 cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
         self.pending_shot = (level, cx, cy)
         result: dict = {"camera_zoom": level}
+        if self.camera is not None:
+            # What the frame will show, in CSS pixels: the centre is clamped so
+            # the frame stays on the page, and an agent should not have to crop
+            # screenshots to find out what it got (agent feedback, 2026-10-09).
+            current = self.camera.final_state()
+            state = (level, cx if cx is not None else current[1],
+                     cy if cy is not None else current[2])
+            frame = self.camera.view(state if level > 1.0 else (1.0, 0.0, 0.0))
+            result["camera_frame"] = {k: round(frame[k]) for k in ("x", "y", "w", "h")}
         if box:
             result["camera_centre"] = {"x": round(cx or 0), "y": round(cy or 0)}
         if note:
@@ -687,9 +705,23 @@ class BrowserSession:
             return
         zoom = self.camera.final_state()[0]
         if self.camera.move(self._camera_now(), zoom, *centre):
+            await self._redraw_sticky_caption()
             # Let the pan land before the click, so the viewer sees where it
             # goes before it happens.
             await asyncio.sleep(EASE_SECONDS)
+
+    async def _redraw_sticky_caption(self) -> None:
+        if self.sticky_caption is None:
+            return
+        caption_id, label = self.sticky_caption
+        try:
+            await self.page.evaluate(
+                caption_script(),
+                {"id": caption_id, "label": label, "duration_ms": 0,
+                 "sticky": True, "view": self._caption_view()},
+            )
+        except PlaywrightError:
+            self.sticky_caption = None
 
     def _caption_view(self) -> dict | None:
         if self.camera is None:
@@ -741,7 +773,8 @@ class BrowserSession:
                 "Element refs are stale; call observe again before using a ref.",
             )
         if self.pending_shot is not None and self.camera is not None:
-            self.camera.move(offset, *self.pending_shot)
+            if self.camera.move(offset, *self.pending_shot):
+                await self._redraw_sticky_caption()
             self.pending_shot = None
         if narration:
             try:
@@ -766,8 +799,10 @@ class BrowserSession:
                 await self.page.evaluate(
                     caption_script(),
                     {"id": live_annotation_id, "label": label, "duration_ms": duration_ms,
-                     "view": self._caption_view()},
+                     "sticky": action.sticky, "view": self._caption_view()},
                 )
+                # Any caption replaces a sticky one.
+                self.sticky_caption = (live_annotation_id, label) if action.sticky else None
             elif action_type == "goto":
                 if not action.url:
                     return await self.error_result("invalid_action", "goto requires url")
@@ -935,6 +970,8 @@ class BrowserSession:
                 # A new page: whatever the camera framed is gone. Back to wide.
                 if self.camera is not None:
                     self.camera.move(action_finished_at, 1.0)
+                # And so is a sticky caption: it lived in the old page.
+                self.sticky_caption = None
             try:
                 await self.page.wait_for_load_state("domcontentloaded", timeout=2000)
             except PlaywrightTimeoutError:
@@ -1001,7 +1038,9 @@ class BrowserSession:
                 await asyncio.sleep(hold_duration - elapsed)
         else:
             padding_applied = False
-        if live_annotation_id:
+        if live_annotation_id and not (
+            self.sticky_caption and self.sticky_caption[0] == live_annotation_id
+        ):
             await self.page.evaluate(
                 "(id) => document.querySelector(`[data-annotation-id=\"${id}\"]`)?.remove()",
                 live_annotation_id,

@@ -120,6 +120,10 @@ def init_schema() -> None:
         }
         if "voice" not in columns:
             connection.execute("ALTER TABLE steps ADD COLUMN voice TEXT")
+        if "quiet" not in columns:
+            connection.execute(
+                "ALTER TABLE steps ADD COLUMN quiet INTEGER NOT NULL DEFAULT 0"
+            )
         session_columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
@@ -220,6 +224,7 @@ def append_step(
     ok: bool,
     error_type: str | None,
     voice: str | None = None,
+    quiet: bool = False,
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
@@ -232,8 +237,8 @@ def append_step(
             INSERT INTO steps
                 (session_id, idx, action_type, target, url, title, narration_text,
                  voice, narration_duration, offset_seconds, screenshot_path, ok,
-                 error_type, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 error_type, created_at, quiet)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -250,6 +255,7 @@ def append_step(
                 int(ok),
                 error_type,
                 _now(),
+                int(quiet),
             ),
         )
 

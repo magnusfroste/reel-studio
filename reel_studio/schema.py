@@ -24,6 +24,12 @@ class Action(BaseModel):
     # and a real model answering a test message takes 15-25 s: the step failed
     # with the click already sent, and the agent pressed the button twice.
     wait_timeout_ms: int = Field(default=8000, ge=1000, le=60000)
+    # caption only: stay on screen until the next caption or a new page,
+    # instead of disappearing after ms — for a beat that outlasts its line.
+    sticky: bool = False
+    # A step that is meant to be silent, as part of the previous narrated
+    # beat (the sign-in click after "Signing in"): not flagged as silent.
+    quiet: bool = False
     narration_timing: Literal["before_action", "after_action", "after_settle"] = "after_settle"
 
 
@@ -48,7 +54,7 @@ ACTION_FIELDS: dict[str, str] = {
     "scroll": "dy (pixels; negative scrolls up)",
     "scroll_to_text": "text",
     "wait": "ms",
-    "caption": "text, ms",
+    "caption": "text, ms, sticky (true: stays until the next caption or page)",
     "set_zoom": "text (a level from 0.5 to 2.0, e.g. \"1.25\")",
     "annotate": "ref, text, style (marker | callout | underline)",
     "mask": "ref (blurs that element on screen until unmask or a page load)",
@@ -60,7 +66,8 @@ ACTION_CONTRACT = (
     + "; ".join(f"{verb}: {ACTION_FIELDS[verb]}" for verb in ACTION_TYPES)
     + ". Optional on any step: target_text (pick the exact element inside ref), "
     "wait_for_url, wait_for_text, wait_timeout_ms (default 8000, up to 60000 for a "
-    "slow answer), settle_ms, narration_timing."
+    "slow answer), settle_ms, narration_timing, quiet (true: silent on purpose, part of "
+    "the previous beat; review does not flag it)."
 )
 
 
@@ -89,6 +96,8 @@ def action_json_schema() -> dict[str, Any]:
             "wait_for_text": {"type": "string"},
             "settle_ms": {"type": "integer", "minimum": 0, "maximum": 10000},
             "wait_timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 60000},
+            "sticky": {"type": "boolean"},
+            "quiet": {"type": "boolean"},
             "narration_timing": {"type": "string", "enum": ["before_action", "after_action", "after_settle"]},
         },
     }

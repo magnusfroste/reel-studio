@@ -1278,7 +1278,10 @@ The screen records from start_session until finish, so plan first and record onc
    need refs. Observe again after the URL changes or an action reports stale_refs.
 6. Narrate every step a viewer sees. Steps without narration are silent. Where the
    video will autoplay muted (LinkedIn, X), also put the key line on screen with a
-   caption step.
+   caption step. A caption with sticky=true stays until the next caption or page:
+   use it for a beat that outlasts its line, such as waiting for an answer. A step
+   that is silent on purpose, because its line was spoken on the step before (the
+   sign-in click after "Signing in"), gets quiet=true and is not flagged.
 7. begin_shot before a beat and verify_shot after it; the description goes in
    intent. finish refuses to publish while a shot is unverified. begin_shot is
    also the camera, moved in post with the text kept sharp:
@@ -1301,8 +1304,9 @@ The screen records from start_session until finish, so plan first and record onc
      a version line, a heading; it takes the first visible match, so pick words
      that appear once (a card's own description, not its title that the
      sidebar repeats). focus_ref centres an element — right for a button. A
-     card has no ref of its own: use a line of its text. Check the reply's
-     camera_centre; camera_note means the focus was not found.
+     card has no ref of its own: use a line of its text. The reply's
+     camera_frame is the rectangle the shot will show, in page pixels;
+     camera_note means the focus was not found.
    - A medium frame shows two thirds of the page width: a heading and a button
      at opposite ends of a wide card do not both fit. Frame the one the voice
      is talking about.
@@ -1514,7 +1518,8 @@ async def _run_action(
             'Call observe (detail="refs" is fast) and use a ref from it.'
             + (f" Refs from the last observe: {', '.join(known[:40])}" if known and error_type == "unknown_ref" else "")
         )
-    elif payload.get("ok") and not narration.strip() and parsed_action.type in SILENT_WARNING_TYPES:
+    elif (payload.get("ok") and not narration.strip() and not parsed_action.quiet
+          and parsed_action.type in SILENT_WARNING_TYPES):
         payload["warning"] = "No narration: this step will be silent in the final video."
     store.append_step(
         session_id,
@@ -1529,6 +1534,7 @@ async def _run_action(
         payload.get("ok", False),
         (payload.get("error") or {}).get("type"),
         session.voice,
+        parsed_action.quiet,
     )
     return payload, screenshot
 
@@ -2023,7 +2029,8 @@ async def review_session(session_id: str) -> dict:
         action_type = step.get("action_type")
         target = step.get("target") or ""
         duration = step.get("narration_duration", 0.0) or 0.0
-        if action_type in {"click", "click_and_wait", "annotate"} and not narration and len(steps) > 1:
+        if (action_type in {"click", "click_and_wait", "annotate"} and not narration
+                and len(steps) > 1 and not step.get("quiet")):
             findings.append({
                 "category": "focus_narration_alignment",
                 "severity": "low",
@@ -2033,7 +2040,8 @@ async def review_session(session_id: str) -> dict:
             
     # 2b. Narration coverage. A take where most visible steps are silent
     # plays as a screen recording with a voice that comes and goes.
-    visible = [step for step in steps if step.get("action_type") in SILENT_WARNING_TYPES and step.get("ok", True)]
+    visible = [step for step in steps if step.get("action_type") in SILENT_WARNING_TYPES
+               and step.get("ok", True) and not step.get("quiet")]
     silent = [step for step in visible if not (step.get("narration_text") or "").strip()]
     if len(visible) >= 4 and len(silent) * 2 > len(visible):
         findings.append({
