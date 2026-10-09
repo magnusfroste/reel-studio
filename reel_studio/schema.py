@@ -30,6 +30,9 @@ class Action(BaseModel):
     # A step that is meant to be silent, as part of the previous narrated
     # beat (the sign-in click after "Signing in"): not flagged as silent.
     quiet: bool = False
+    # Done during the recording but kept out of the video: signing in,
+    # dismissing a cookie banner, getting to the first page worth showing.
+    offscreen: bool = False
     narration_timing: Literal["before_action", "after_action", "after_settle"] = "after_settle"
 
 
@@ -67,7 +70,8 @@ ACTION_CONTRACT = (
     + ". Optional on any step: target_text (pick the exact element inside ref), "
     "wait_for_url, wait_for_text, wait_timeout_ms (default 8000, up to 60000 for a "
     "slow answer), settle_ms, narration_timing, quiet (true: silent on purpose, part of "
-    "the previous beat; review does not flag it)."
+    "the previous beat; review does not flag it), offscreen (true: done but cut "
+    "from the video — signing in, a cookie banner; no narration)."
 )
 
 
@@ -98,6 +102,7 @@ def action_json_schema() -> dict[str, Any]:
             "wait_timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 60000},
             "sticky": {"type": "boolean"},
             "quiet": {"type": "boolean"},
+            "offscreen": {"type": "boolean"},
             "narration_timing": {"type": "string", "enum": ["before_action", "after_action", "after_settle"]},
         },
     }

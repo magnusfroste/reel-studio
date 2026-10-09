@@ -34,6 +34,8 @@ from .render import (
     rerender_narration,
     segmented_render,
     segmented_render_enabled,
+    QUIET_FLOOR,
+    SEGMENT_FLOOR,
 )
 from .camera import MAX_ZOOM, Camera
 from .schema import ACTION_CONTRACT, ACTION_TYPES, FRAMINGS, Action, action_json_schema, mask_stylesheet
@@ -1309,7 +1311,11 @@ The screen records from start_session until finish, so plan first and record onc
    caption step. A caption with sticky=true stays until the next caption or page:
    use it for a beat that outlasts its line, such as waiting for an answer. A step
    that is silent on purpose, because its line was spoken on the step before (the
-   sign-in click after "Signing in"), gets quiet=true and is not flagged.
+   sign-in click after "Signing in"), gets quiet=true and is not flagged, and
+   lasts 0.6 s in the video.
+   offscreen=true does a step without showing it: sign in, dismiss a cookie
+   banner, get to the first page worth showing. Open the video on the product,
+   not on a login form — the first seconds decide whether anyone watches.
    The voice is yours to choose: list_voices(language="en") lists them with
    their gender and personality; pass one as start_session(voice=...). It
    stays for the whole video.
@@ -1633,6 +1639,7 @@ async def _run_action(
         (payload.get("error") or {}).get("type"),
         session.voice,
         parsed_action.quiet,
+        parsed_action.offscreen,
     )
     return payload, screenshot
 
@@ -1662,7 +1669,13 @@ async def act_batch(
         Field(json_schema_extra={"items": {
             "type": "object",
             "required": ["action"],
-            "properties": {"action": action_json_schema(), "narration": {"type": "string"}},
+            "properties": {
+                "action": action_json_schema(),
+                "narration": {"type": "string"},
+                "quiet": {"type": "boolean"},
+                "sticky": {"type": "boolean"},
+                "offscreen": {"type": "boolean"},
+            },
         }}),
     ],
 ) -> CallToolResult:
@@ -1694,8 +1707,15 @@ async def act_batch(
             )
             results.append(payload)
             break
+        action = dict(step["action"])
+        # The flags belong inside the action, but a step-level one is plainly
+        # meant for it too: an agent that wrote {"action": {...}, "quiet": true}
+        # had every flag silently dropped (2026-10-09).
+        for flag in ("quiet", "sticky", "offscreen"):
+            if flag in step and flag not in action:
+                action[flag] = step[flag]
         payload, screenshot = await _run_action(
-            session_id, step["action"], str(step.get("narration") or "")
+            session_id, action, str(step.get("narration") or "")
         )
         results.append(payload)
         if not payload.get("ok"):
@@ -1938,6 +1958,8 @@ async def rerender(session_id: str) -> dict:
     )
     video_duration = await asyncio.to_thread(probe_duration, source_video)
     render_pages: list[str] = []
+    render_floors: list[float] = []
+    lead_in = not (session["steps"] and session["steps"][0].get("offscreen"))
     steps = session["steps"]
     for index, step in enumerate(steps):
         offset = step.get("offset_seconds")
@@ -1958,8 +1980,11 @@ async def rerender(session_id: str) -> dict:
             clips.append((offset, clip))
         else:
             duration = float(step.get("narration_duration") or 0.0)
+        if step.get("offscreen"):
+            continue
         render_steps.append((offset, clip, duration))
         render_pages.append(step.get("url") or "")
+        render_floors.append(QUIET_FLOOR if step.get("quiet") else SEGMENT_FLOOR)
     if segmented_render_enabled():
         output_width = session.get("output_width")
         output_height = session.get("output_height")
@@ -1971,6 +1996,7 @@ async def rerender(session_id: str) -> dict:
         result = await asyncio.to_thread(
             segmented_render, source_video, render_steps, video_path, output_size,
             render_config, Camera.load(output_dir), render_pages,
+            render_floors, lead_in,
         )
         warnings = result.warnings
         duration = result.duration
@@ -2131,7 +2157,7 @@ async def review_session(session_id: str) -> dict:
         target = step.get("target") or ""
         duration = step.get("narration_duration", 0.0) or 0.0
         if (action_type in {"click", "click_and_wait", "annotate"} and not narration
-                and len(steps) > 1 and not step.get("quiet")):
+                and len(steps) > 1 and not step.get("quiet") and not step.get("offscreen")):
             findings.append({
                 "category": "focus_narration_alignment",
                 "severity": "low",
@@ -2141,8 +2167,18 @@ async def review_session(session_id: str) -> dict:
             
     # 2b. Narration coverage. A take where most visible steps are silent
     # plays as a screen recording with a voice that comes and goes.
-    visible = [step for step in steps if step.get("action_type") in SILENT_WARNING_TYPES
-               and step.get("ok", True) and not step.get("quiet")]
+    # A silent step right after a narrated one belongs to that line — the
+    # common shape is a caption step that carries the narration and the click
+    # that follows it. Counting those as silent called a fully narrated take
+    # "mostly silent" (2026-10-09).
+    previous_narrated: set[int] = set()
+    for position in range(1, len(steps)):
+        if (steps[position - 1].get("narration_text") or "").strip():
+            previous_narrated.add(position)
+    visible = [step for position, step in enumerate(steps)
+               if step.get("action_type") in SILENT_WARNING_TYPES
+               and step.get("ok", True) and not step.get("quiet") and not step.get("offscreen")
+               and position not in previous_narrated]
     silent = [step for step in visible if not (step.get("narration_text") or "").strip()]
     if len(visible) >= 4 and len(silent) * 2 > len(visible):
         findings.append({

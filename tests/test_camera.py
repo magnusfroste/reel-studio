@@ -166,6 +166,8 @@ def test_the_length_estimate_is_the_render_plan_not_the_clock():
     fake = SimpleNamespace(
         timeline=[(10.0, None, 2.0), (400.0, None, 3.0)],
         render_config=RenderConfig(title="T", cta_url="https://example.com"),
+        timeline_floors=[1.0, 1.0],
+        offscreen_first=False,
     )
     estimate = BrowserSession.estimated_length(fake, 800.0)
     assert estimate == pytest.approx(1.0 + 2.4 + 3.4 + 2 * CARD_DURATION)
@@ -192,3 +194,11 @@ def test_a_new_page_cuts_to_wide_instead_of_easing():
     expression = camera.zoompan(19.5, 21.0, (1920, 1080))
     assert "/0.001," in expression  # a step, not a one-second ease
     assert "/1.000," not in expression.split("20.000")[1].split(")")[0]
+
+
+def test_quiet_steps_are_short_and_the_lead_in_can_go():
+    steps = [(5.0, None, 0.0), (10.0, None, 0.0), (20.0, None, 2.0)]
+    segments, _ = render.plan_segments(steps, 60.0, floors=[1.0, render.QUIET_FLOOR, 1.0])
+    assert [round(s.output_duration, 2) for s in segments] == [1.0, 1.4, 0.6, 2.4]
+    no_lead, _ = render.plan_segments(steps, 60.0, lead_in=False)
+    assert no_lead[0].name == "0000"

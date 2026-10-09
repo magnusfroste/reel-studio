@@ -172,7 +172,9 @@ def test_review_flags_a_mostly_silent_take(mods):
                           "Narrated." if i == 0 else "", 0, float(i), None, True, None, "en-US-JennyNeural")
     review = asyncio.run(server.review_session("s-quiet"))
     coverage = [f for f in review["findings"] if f["category"] == "narration_coverage"]
-    assert coverage and "4 of 5" in coverage[0]["message"]
+    # The click right after the narrated one belongs to its line; the other
+    # three of the remaining four are silent.
+    assert coverage and "3 of 4" in coverage[0]["message"]
 
 
 def test_finish_refuses_a_take_where_every_step_failed(mods):
@@ -377,3 +379,37 @@ def test_start_session_offers_transitions_and_there_is_a_voice_list(mods):
     assert server._render_config("", "", "#000000", "", "", "none", "CUTS").transitions == "cuts"
     assert server._render_config("", "", "#000000", "", "", "none", "fancy").transitions == "smooth"
     assert "list_voices" in server.director()
+
+
+def test_act_batch_takes_flags_written_beside_the_action(mods):
+    server, store, _ = mods
+    _new_session(store, "s-flags")
+    server.sessions["s-flags"] = FakeSession(act_result={"ok": True, "offset_seconds": 1.0})
+    try:
+        asyncio.run(server.act_batch("s-flags", [
+            {"action": {"type": "click", "ref": "r"}, "quiet": True},
+            {"action": {"type": "goto", "url": "https://example.com"}, "offscreen": True},
+        ]))
+    finally:
+        server.sessions.pop("s-flags", None)
+    steps = store.get_session("s-flags")["steps"]
+    assert steps[0]["quiet"] == 1 and steps[1]["offscreen"] == 1
+
+
+def test_a_click_after_a_narrated_caption_is_not_called_silent(mods):
+    server, store, _ = mods
+    _new_session(store, "s-coverage")
+    for i in range(5):
+        store.append_step("s-coverage", "caption", None, "https://example.com", "t",
+                          f"Line {i}.", 2.0, i * 10.0, None, True, None)
+        store.append_step("s-coverage", "click", f"button:{i}", "https://example.com", "t",
+                          "", 0.0, i * 10.0 + 5, None, True, None)
+    review = asyncio.run(server.review_session("s-coverage"))
+    assert "narration_coverage" not in [f["category"] for f in review["findings"]]
+
+
+def test_offscreen_is_part_of_the_contract():
+    from reel_studio.schema import ACTION_CONTRACT, Action, action_json_schema
+
+    assert Action(type="type", ref="r", text="x", offscreen=True).offscreen
+    assert "offscreen" in action_json_schema()["properties"] and "offscreen" in ACTION_CONTRACT

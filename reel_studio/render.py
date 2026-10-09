@@ -317,6 +317,10 @@ def _mux_segment_audio(
 
 
 SEGMENT_FLOOR = 1.0
+# A step that is silent on purpose (quiet) is part of the beat before it: a
+# click, a page turning. A second and a half of it per step made sign-in and
+# navigation the slowest part of a video.
+QUIET_FLOOR = 0.6
 SEGMENT_TAIL_PAD = 0.4
 LEAD_IN_CAP = 1.0
 
@@ -349,6 +353,8 @@ class Segment:
 def plan_segments(
     steps: Sequence[tuple[float, Path | None, float]],
     video_duration: float,
+    floors: Sequence[float] | None = None,
+    lead_in: bool = True,
 ) -> tuple[list[Segment], list[dict]]:
     """The windows of the recording a segmented render keeps, in order.
 
@@ -357,6 +363,11 @@ def plan_segments(
     narration outlasts its footage holds its last frame. The time between
     steps, when an agent was thinking, is cut. Shared by the renderer and by
     the length estimate a director sees while recording.
+
+    ``floors`` gives each step its own minimum (QUIET_FLOOR for a quiet
+    step), in the order of ``steps``. ``lead_in`` False drops the second of
+    footage before the first step — the video then opens on the first step,
+    not on whatever was on screen while it was set up offscreen.
     """
     ordered = sorted(
         (offset, index, clip, max(0.0, duration))
@@ -365,7 +376,7 @@ def plan_segments(
     )
     segments: list[Segment] = []
     warnings: list[dict] = []
-    if ordered and ordered[0][0] > 0:
+    if lead_in and ordered and ordered[0][0] > 0:
         lead = min(LEAD_IN_CAP, ordered[0][0])
         segments.append(Segment("lead", 0.0, lead, lead))
     for index, (offset, step_index, clip, narration_duration) in enumerate(ordered):
@@ -375,7 +386,13 @@ def plan_segments(
         available = max(0.0, next_offset - offset)
         if available <= 0:
             continue
-        target = max(narration_duration, SEGMENT_FLOOR) + SEGMENT_TAIL_PAD
+        floor = (
+            floors[step_index]
+            if floors is not None and step_index < len(floors) else SEGMENT_FLOOR
+        )
+        target = (max(narration_duration, floor) + SEGMENT_TAIL_PAD) if narration_duration else (
+            floor + (SEGMENT_TAIL_PAD if floor >= SEGMENT_FLOOR else 0.0)
+        )
         keep_duration = min(available, target)
         if narration_duration > available:
             warnings.append({
@@ -399,6 +416,8 @@ def segmented_render(
     config: RenderConfig | None = None,
     camera: "Camera | None" = None,
     pages: Sequence[str] | None = None,
+    floors: Sequence[float] | None = None,
+    lead_in: bool = True,
 ) -> SegmentedRenderResult:
     """Render kept step windows from the original continuous recording.
 
@@ -410,7 +429,7 @@ def segmented_render(
     if camera is not None:
         output_size = camera.output_size(output_size)
     video_duration = probe_duration(video_path)
-    segments, warnings = plan_segments(steps, video_duration)
+    segments, warnings = plan_segments(steps, video_duration, floors, lead_in)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".segments-", dir=output_path.parent
