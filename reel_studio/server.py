@@ -1271,6 +1271,9 @@ The screen records from start_session until finish, so plan first and record onc
    failed probe; discard probes with delete_session(confirm=True, force=True).
 3. """ + ACTION_CONTRACT + """
 4. Use act_batch for each beat (up to 20 steps): one round trip, not one per click.
+   An action that starts something slow (a model answering, a build) gets
+   wait_for_text with wait_timeout_ms up to 60000; if it still times out, the
+   click already happened — wait for the result, do not press it again.
 5. observe once per page and reuse its refs; observe(detail="refs") when you only
    need refs. Observe again after the URL changes or an action reports stale_refs.
 6. Narrate every step a viewer sees. Steps without narration are silent. Where the
@@ -1290,6 +1293,15 @@ The screen records from start_session until finish, so plan first and record onc
      never rests is as tiring as one that never moves.
    - While pushed in, the camera pans to anything you click or type into off
      frame, and captions are drawn inside the frame.
+   - Frame what the voice names. A line about a button is a shot of the button:
+     push in medium on it before the click, not wide. A line about a result is
+     a close on the result.
+   - The focus must be on screen when you call begin_shot: scroll it into view
+     first. Prefer focus_ref; focus_text takes the first visible match, which
+     can be a sidebar entry with the same words. Check the reply's
+     camera_centre; camera_note means the focus was not found.
+   - verify_shot right after its beat. A shot can be declared again with the
+     same shot_id to correct it.
 8. Keep secrets unreadable: start_session(mask=[CSS selectors]) blurs matching
    elements on every page from the first frame; the mask action blurs one element.
 9. Several controls can share a name (a "Sign In" tab and a "Sign In" button):
@@ -1707,7 +1719,13 @@ async def verify_shot(
         if stored is None:
             raise ValueError(f"unknown shot: {shot_id}")
         note = verification_note.strip()
-        if verified and stored.get("focus_text"):
+        # The live page says something only about the shot being recorded
+        # now. Checked for an earlier shot, it failed whenever the director
+        # had moved on to another page, and the only way to pass was to go
+        # back — which put the detour in the video (2026-10-09).
+        shots_so_far = (store.get_session(session_id) or {}).get("shots", [])
+        is_current = bool(shots_so_far) and shots_so_far[-1]["shot_id"] == shot_id.strip()
+        if verified and stored.get("focus_text") and is_current:
             live = sessions.get(session_id)
             if live is not None:
                 visible = await live.assert_visible(stored["focus_text"])
@@ -2128,9 +2146,17 @@ async def finish(session_id: str) -> dict:
             "ok": False,
             "error": {
                 "type": "shot_review_required",
-                "message": "Verify all storyboard shots before publishing.",
+                "message": "Verify all storyboard shots before publishing: "
+                + "; ".join(
+                    f"{shot['shot_id']} is {shot.get('status')}"
+                    + (f" ({shot['verification_note']})" if shot.get("verification_note") else "")
+                    for shot in pending
+                ),
                 "pending_shots": [shot["shot_id"] for shot in pending],
             },
+            "hint": "verify_shot(session_id, shot_id, verified=True) once you have checked the "
+            "shot; an earlier shot is not checked against the page on screen now. "
+            "begin_shot with the same shot_id replaces a shot.",
         }
     try:
         video_path = await session.finish()

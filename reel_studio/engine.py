@@ -361,11 +361,26 @@ class BrowserSession:
 
     async def capture_screenshot(self) -> Path:
         screenshot = self.directory / f"screenshot-{int(time.time() * 1000)}.jpg"
-        # CSS-sized, whatever the capture density: boxes and refs an agent
-        # reads off a screenshot are in CSS pixels.
-        await self.page.screenshot(
-            path=str(screenshot), type="jpeg", quality=80, scale="css"
+        scale = self.camera.scale if self.camera is not None else 1.0
+        if scale == 1.0:
+            await self.page.screenshot(path=str(screenshot), type="jpeg", quality=80)
+            return screenshot
+        # Taken at the capture density and scaled to CSS size afterwards, so
+        # boxes an agent reads off it are in CSS pixels. Playwright's
+        # scale="css" switches the live page to scale 1 while it captures,
+        # and the recording caught it: after every step the page shrank to
+        # 3/4 in the top-left corner with white around it for a few frames
+        # (the "flicker between pans", 2026-10-09).
+        raw = screenshot.with_suffix(".raw.jpg")
+        await self.page.screenshot(path=str(raw), type="jpeg", quality=90)
+        await asyncio.to_thread(
+            subprocess.run,
+            ["ffmpeg", "-loglevel", "error", "-y", "-i", str(raw),
+             "-vf", f"scale={self.width}:{self.height}", "-q:v", "4",
+             str(screenshot)],
+            check=True,
         )
+        raw.unlink(missing_ok=True)
         return screenshot
 
     async def _stable_selector(self, item: Locator) -> str:
@@ -589,7 +604,7 @@ class BrowserSession:
             elif focus_text:
                 target = await self._visible_text_target(focus_text, exact=False)
                 if target is not None:
-                    box = await target.bounding_box()
+                    box = await self._text_box(target, focus_text)
             if box is None:
                 note = (
                     "No focus_ref or focus_text box on screen: the camera pushes in "
@@ -597,7 +612,10 @@ class BrowserSession:
                 )
         cx = cy = None
         if box:
-            cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+            if self.camera is not None:
+                cx, cy = self.camera.aim(box, level)
+            else:
+                cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
         self.pending_shot = (level, cx, cy)
         result: dict = {"camera_zoom": level}
         if box:
@@ -605,6 +623,47 @@ class BrowserSession:
         if note:
             result["camera_note"] = note
         return result
+
+    async def _text_box(self, target: Locator, text: str) -> dict | None:
+        """The box of the words themselves, not of the element holding them.
+
+        get_by_text resolves to an element, and a block element is as wide as
+        its container even when its text is a short line at the left.
+        """
+        try:
+            box = await target.evaluate(
+                """(el, needle) => {
+                    const want = needle.toLowerCase().replace(/\\s+/g, ' ').trim();
+                    const rectOf = (range) => {
+                        const b = range.getBoundingClientRect();
+                        return b.width && b.height
+                            ? {x: b.x, y: b.y, width: b.width, height: b.height} : null;
+                    };
+                    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+                    let node;
+                    while ((node = walker.nextNode())) {
+                        const at = node.data.toLowerCase().indexOf(want);
+                        if (at < 0) continue;
+                        const range = document.createRange();
+                        range.setStart(node, at);
+                        range.setEnd(node, Math.min(node.data.length, at + want.length));
+                        const rect = rectOf(range);
+                        if (rect) return rect;
+                    }
+                    const range = document.createRange();
+                    range.selectNodeContents(el);
+                    return rectOf(range);
+                }""",
+                text.strip(),
+            )
+        except PlaywrightError:
+            box = None
+        if box:
+            return box
+        try:
+            return await target.bounding_box()
+        except PlaywrightError:
+            return None
 
     def _camera_now(self) -> float:
         return time.monotonic() - self.t0
@@ -877,7 +936,7 @@ class BrowserSession:
             if action.wait_for_url:
                 try:
                     await self.page.wait_for_url(
-                        f"**{action.wait_for_url}**", timeout=8000
+                        f"**{action.wait_for_url}**", timeout=action.wait_timeout_ms
                     )
                     settled_by["url_contains"] = action.wait_for_url
                 except PlaywrightTimeoutError as exc:
@@ -886,7 +945,7 @@ class BrowserSession:
                         f"URL did not contain {action.wait_for_url!r}: {exc}",
                     )
             if action.wait_for_text:
-                deadline = time.monotonic() + 8.0
+                deadline = time.monotonic() + action.wait_timeout_ms / 1000
                 while time.monotonic() < deadline:
                     # Contained text, not the element's whole text: "The model
                     # answered" never matched "✓ The model answered in 17.4s.
@@ -899,7 +958,11 @@ class BrowserSession:
                 else:
                     return await self.error_result(
                         "page_not_settled",
-                        f"Visible text did not appear: {action.wait_for_text}",
+                        f"Visible text did not appear within "
+                        f"{action.wait_timeout_ms} ms: {action.wait_for_text}. "
+                        "The action itself already ran — do not repeat it; wait "
+                        "for the text with a wait step, and set wait_timeout_ms "
+                        "(up to 60000) for slow answers.",
                     )
             await self.page.wait_for_timeout(action.settle_ms)
             action_completed_at = time.monotonic() - self.t0

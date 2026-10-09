@@ -27,7 +27,9 @@ MAX_ZOOM = 2.5
 EASE_SECONDS = 1.0
 # A target whose centre leaves the middle of the view gets the camera panned
 # to it before it is clicked or typed into, so no action happens off-frame.
-FOLLOW_MARGIN = 0.15
+FOLLOW_MARGIN = 0.05
+# Space kept between a wide target's first edge and the frame's edge.
+AIM_PAD = 0.08
 CAMERA_FILE = "camera.json"
 
 SCALE_CANDIDATES = (4 / 3, 1.5, 2.0)
@@ -135,20 +137,37 @@ class Camera:
                           "cx": round(cx, 1), "cy": round(cy, 1)})
         return True
 
+    def _anchor(self, box: dict, zoom: float) -> tuple[float, float, float, float]:
+        """The part of a box a frame at this zoom should show.
+
+        A box that fits is shown whole. One wider or taller than the frame is
+        shown from its start: centring a full-width result panel put its
+        first words — "✓ The model answered" — off the left edge, and the
+        close-up showed an empty green box ending in "work." (2026-10-09).
+        """
+        view_w, view_h = self.width / zoom, self.height / zoom
+        usable_w, usable_h = view_w * (1 - 2 * AIM_PAD), view_h * (1 - 2 * AIM_PAD)
+        x0, y0 = box["x"], box["y"]
+        return x0, y0, x0 + min(box["width"], usable_w), y0 + min(box["height"], usable_h)
+
+    def aim(self, box: dict, zoom: float) -> tuple[float, float]:
+        """The centre that frames a box at this zoom."""
+        x0, y0, x1, y1 = self._anchor(box, max(zoom, 1.0))
+        return (x0 + x1) / 2, (y0 + y1) / 2
+
     def needs_follow(self, box: dict | None) -> tuple[float, float] | None:
-        """The centre to pan to so a target is well inside the view, if needed."""
+        """The centre to pan to so a target is inside the view, if needed."""
         if not box:
             return None
         zoom, _, _ = self.final_state()
         if zoom <= 1.0:
             return None
         view = self.view()
-        tx = box["x"] + box["width"] / 2
-        ty = box["y"] + box["height"] / 2
+        x0, y0, x1, y1 = self._anchor(box, zoom)
         mx, my = view["w"] * FOLLOW_MARGIN, view["h"] * FOLLOW_MARGIN
-        inside = (view["x"] + mx <= tx <= view["x"] + view["w"] - mx
-                  and view["y"] + my <= ty <= view["y"] + view["h"] - my)
-        return None if inside else (tx, ty)
+        inside = (view["x"] + mx <= x0 and x1 <= view["x"] + view["w"] - mx
+                  and view["y"] + my <= y0 and y1 <= view["y"] + view["h"] - my)
+        return None if inside else self.aim(box, zoom)
 
     def moves(self) -> bool:
         return any(key["zoom"] != 1.0 for key in self.keys)
