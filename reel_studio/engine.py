@@ -247,6 +247,8 @@ class BrowserSession:
     refs: dict[str, str] = field(default_factory=dict)
     narrations: list[tuple[float, Path, str]] = field(default_factory=list)
     timeline: list[tuple[float, Path | None, float]] = field(default_factory=list)
+    # The URL each timeline step ended on: a page change is a hard cut.
+    timeline_pages: list[str] = field(default_factory=list)
     refs_stale: bool = True
     runtime_closed: bool = False
     # Monotonic time of the last tool call on this session; see touch().
@@ -1076,6 +1078,7 @@ class BrowserSession:
         if clip:
             self.narrations.append((offset, clip, narration))
         self.timeline.append((offset, clip, hold_duration))
+        self.timeline_pages.append(self.page.url)
         if hold_duration:
             elapsed = time.monotonic() - (self.t0 + offset)
             padding_applied = elapsed < hold_duration
@@ -1163,7 +1166,7 @@ class BrowserSession:
         if segmented_render_enabled():
             segmented_render(
                 video, self.timeline, final, self.output_size,
-                self.render_config, self.camera,
+                self.render_config, self.camera, self.timeline_pages,
             )
         else:
             mux_narration(

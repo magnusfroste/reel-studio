@@ -366,3 +366,14 @@ def test_quiet_silences_the_warning_and_sticky_is_a_caption_option():
     props = action_json_schema()["properties"]
     assert "sticky" in props and "quiet" in props
     assert "sticky" in ACTION_CONTRACT and "quiet" in ACTION_CONTRACT
+
+
+def test_start_session_offers_transitions_and_there_is_a_voice_list(mods):
+    server, _, _ = mods
+    tools = _tools(server)
+    props = tools["start_session"].inputSchema["properties"]
+    assert props["transitions"]["enum"] == ["smooth", "cuts"]
+    assert "list_voices" in tools
+    assert server._render_config("", "", "#000000", "", "", "none", "CUTS").transitions == "cuts"
+    assert server._render_config("", "", "#000000", "", "", "none", "fancy").transitions == "smooth"
+    assert "list_voices" in server.director()

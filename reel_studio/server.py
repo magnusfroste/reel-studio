@@ -867,6 +867,7 @@ def _render_config(
     cta_url: str,
     cta_text: str,
     music: str,
+    transitions: str = "smooth",
 ) -> RenderConfig:
     normalized_accent = accent.strip()
     if not re.fullmatch(r"#?[0-9a-fA-F]{6}", normalized_accent):
@@ -883,6 +884,7 @@ def _render_config(
         cta_url=cta_url.strip(),
         cta_text=cta_text.strip() or "Learn more",
         music=normalized_music,
+        transitions="cuts" if transitions.strip().lower() == "cuts" else "smooth",
     )
 
 
@@ -1282,6 +1284,12 @@ The screen records from start_session until finish, so plan first and record onc
    use it for a beat that outlasts its line, such as waiting for an answer. A step
    that is silent on purpose, because its line was spoken on the step before (the
    sign-in click after "Signing in"), gets quiet=true and is not flagged.
+   The voice is yours to choose: list_voices(language="en") lists them with
+   their gender and personality; pass one as start_session(voice=...). It
+   stays for the whole video.
+   Joins between steps are chosen for you (transitions="smooth": a cut on a
+   new page, a short dissolve where a cut would jump). transitions="cuts"
+   makes every join a hard cut, for a brisker, more technical feel.
 7. begin_shot before a beat and verify_shot after it; the description goes in
    intent. finish refuses to publish while a shot is unverified. begin_shot is
    also the camera, moved in post with the text kept sharp:
@@ -1334,6 +1342,61 @@ def director() -> str:
     return DIRECTOR_PROMPT
 
 
+_VOICE_CACHE: list[dict] = []
+
+
+@mcp.tool()
+async def list_voices(
+    language: Annotated[
+        str,
+        Field(description="A language or locale prefix: \"en\", \"en-GB\", \"sv\". Empty lists all."),
+    ] = "en",
+    gender: Annotated[
+        str,
+        Field(description="Female, Male, or empty for both."),
+    ] = "",
+) -> dict:
+    """List the narration voices start_session(voice=...) accepts.
+
+    The free Edge provider has several hundred neural voices across languages;
+    every session used to get the default en-US-JennyNeural because nothing
+    told an agent what else there was. Pick one that suits the audience and
+    the brand — and keep it for the whole video.
+    """
+    if not _VOICE_CACHE:
+        import edge_tts
+
+        try:
+            voices = await edge_tts.list_voices()
+        except Exception as exc:
+            return {"ok": False, "error": {"type": "voices_unavailable", "message": str(exc)}}
+        _VOICE_CACHE.extend(
+            {
+                "voice": voice.get("ShortName"),
+                "locale": voice.get("Locale"),
+                "gender": voice.get("Gender"),
+                "personality": ", ".join(
+                    (voice.get("VoiceTag") or {}).get("VoicePersonalities") or []
+                ),
+            }
+            for voice in voices
+        )
+    prefix = language.strip().lower()
+    wanted_gender = gender.strip().lower()
+    matches = [
+        voice for voice in _VOICE_CACHE
+        if (not prefix or (voice["locale"] or "").lower().startswith(prefix))
+        and (not wanted_gender or (voice["gender"] or "").lower() == wanted_gender)
+    ]
+    return {
+        "ok": True,
+        "provider": "edge",
+        "default": "en-US-JennyNeural",
+        "count": len(matches),
+        "voices": matches[:120],
+    }
+
+
 @mcp.tool()
 async def start_session(
     start_url: str, width: int = 1920, height: int = 1080,
@@ -1346,6 +1409,13 @@ async def start_session(
     cta_url: str = "",
     cta_text: str = "Learn more",
     music: str = "none",
+    transitions: Annotated[
+        str,
+        Field(description="How steps are joined. smooth (default): a hard cut on a page "
+                          "change, a short dissolve where a cut would jump on the same page, "
+                          "fades on the title and closing cards. cuts: every join a hard cut.",
+              json_schema_extra={"enum": ["smooth", "cuts"]}),
+    ] = "smooth",
     mask: Annotated[
         list[str] | None,
         Field(description="CSS selectors blurred on every page from the first frame, e.g. "
@@ -1358,9 +1428,10 @@ async def start_session(
     Recording starts now and runs until finish, so plan the script and find
     your way around the site before calling this. Defaults: 1920x1080 capture
     (output_size, e.g. "1280x720", downscales only the final MP4); voice
-    en-US-JennyNeural on the free Edge provider (provider "elevenlabs" needs
-    ELEVENLABS_API_KEY and takes a voice id); no music ("subtle" adds a quiet
-    bed); title/subtitle add a 3-second intro card, cta_url/cta_text an outro.
+    en-US-JennyNeural on the free Edge provider — list_voices shows the others
+    (provider "elevenlabs" needs ELEVENLABS_API_KEY and takes a voice id); no
+    music ("subtle" adds a quiet bed); title/subtitle add a 3-second intro
+    card, cta_url/cta_text an outro; transitions smooth (default) or cuts.
 
     mask blurs matching elements on every page from the first frame; the
     mask action does the same for one element mid-recording.
@@ -1390,7 +1461,7 @@ async def start_session(
     except ValueError as exc:
         return {"ok": False, "error": {"type": "invalid_mask", "message": str(exc)}}
     render_config = _render_config(
-        title, subtitle, accent, cta_url, cta_text, music
+        title, subtitle, accent, cta_url, cta_text, music, transitions
     )
     session = await BrowserSession.create(
         start_url, width, height, voice, selected_provider, selected_output_size,
@@ -1415,6 +1486,7 @@ async def start_session(
         render_config.cta_url,
         render_config.cta_text,
         render_config.music,
+        render_config.transitions,
     )
     result: dict = {"session_id": session.session_id}
     if others:
@@ -1836,8 +1908,10 @@ async def rerender(session_id: str) -> dict:
         session.get("cta_url", ""),
         session.get("cta_text", "Learn more"),
         session.get("music", "none"),
+        session.get("transitions") or "smooth",
     )
     video_duration = await asyncio.to_thread(probe_duration, source_video)
+    render_pages: list[str] = []
     steps = session["steps"]
     for index, step in enumerate(steps):
         offset = step.get("offset_seconds")
@@ -1859,6 +1933,7 @@ async def rerender(session_id: str) -> dict:
         else:
             duration = float(step.get("narration_duration") or 0.0)
         render_steps.append((offset, clip, duration))
+        render_pages.append(step.get("url") or "")
     if segmented_render_enabled():
         output_width = session.get("output_width")
         output_height = session.get("output_height")
@@ -1869,7 +1944,7 @@ async def rerender(session_id: str) -> dict:
         )
         result = await asyncio.to_thread(
             segmented_render, source_video, render_steps, video_path, output_size,
-            render_config, Camera.load(output_dir),
+            render_config, Camera.load(output_dir), render_pages,
         )
         warnings = result.warnings
         duration = result.duration
