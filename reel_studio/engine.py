@@ -24,6 +24,8 @@ from playwright.async_api import (
 
 from .render import (
     CARD_DURATION,
+    QUIET_FLOOR,
+    SEGMENT_FLOOR,
     mux_narration,
     plan_segments,
     probe_duration,
@@ -249,6 +251,12 @@ class BrowserSession:
     timeline: list[tuple[float, Path | None, float]] = field(default_factory=list)
     # The URL each timeline step ended on: a page change is a hard cut.
     timeline_pages: list[str] = field(default_factory=list)
+    # Each timeline step's minimum length in the video: QUIET_FLOOR for a step
+    # silent on purpose, SEGMENT_FLOOR otherwise.
+    timeline_floors: list[float] = field(default_factory=list)
+    # A step done offscreen before anything was shown: the video then opens on
+    # the first visible step rather than on the page it was set up from.
+    offscreen_first: bool = False
     refs_stale: bool = True
     runtime_closed: bool = False
     # Monotonic time of the last tool call on this session; see touch().
@@ -814,6 +822,12 @@ class BrowserSession:
                 "stale_refs",
                 "Element refs are stale; call observe again before using a ref.",
             )
+        if action.offscreen and narration.strip():
+            return await self.error_result(
+                "invalid_action",
+                "An offscreen step is cut from the video, so it cannot be narrated. "
+                "Narrate the first visible step instead.",
+            )
         if narration:
             try:
                 clip = await synthesize(
@@ -1096,10 +1110,17 @@ class BrowserSession:
                 await self._redraw_sticky_caption()
             self.pending_shot = None
         hold_duration = annotation_hold_seconds(duration, annotation_duration)
-        if clip:
-            self.narrations.append((offset, clip, narration))
-        self.timeline.append((offset, clip, hold_duration))
-        self.timeline_pages.append(self.page.url)
+        if action.offscreen:
+            # Done, but not part of the video: it adds nothing to the timeline
+            # the renderer cuts from, so the footage around it is cut away.
+            if not self.timeline:
+                self.offscreen_first = True
+        else:
+            if clip:
+                self.narrations.append((offset, clip, narration))
+            self.timeline.append((offset, clip, hold_duration))
+            self.timeline_pages.append(self.page.url)
+            self.timeline_floors.append(QUIET_FLOOR if action.quiet else SEGMENT_FLOOR)
         if hold_duration:
             elapsed = time.monotonic() - (self.t0 + offset)
             padding_applied = elapsed < hold_duration
@@ -1160,7 +1181,10 @@ class BrowserSession:
         """
         if not segmented_render_enabled():
             return elapsed
-        segments, _ = plan_segments(self.timeline, max(elapsed, 0.001))
+        segments, _ = plan_segments(
+            self.timeline, max(elapsed, 0.001), self.timeline_floors,
+            not self.offscreen_first,
+        )
         cards = CARD_DURATION * (
             bool(self.render_config.title.strip())
             + bool(self.render_config.cta_url.strip())
@@ -1188,6 +1212,7 @@ class BrowserSession:
             segmented_render(
                 video, self.timeline, final, self.output_size,
                 self.render_config, self.camera, self.timeline_pages,
+                self.timeline_floors, not self.offscreen_first,
             )
         else:
             mux_narration(
