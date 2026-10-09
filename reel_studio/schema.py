@@ -20,6 +20,10 @@ class Action(BaseModel):
     wait_for_url: str | None = None
     wait_for_text: str | None = None
     settle_ms: int = Field(default=500, ge=0, le=10000)
+    # How long wait_for_url / wait_for_text may take. 8 s was a fixed limit,
+    # and a real model answering a test message takes 15-25 s: the step failed
+    # with the click already sent, and the agent pressed the button twice.
+    wait_timeout_ms: int = Field(default=8000, ge=1000, le=60000)
     narration_timing: Literal["before_action", "after_action", "after_settle"] = "after_settle"
 
 
@@ -55,7 +59,8 @@ ACTION_CONTRACT = (
     "action = {\"type\": <verb>, ...}. Verbs and their fields: "
     + "; ".join(f"{verb}: {ACTION_FIELDS[verb]}" for verb in ACTION_TYPES)
     + ". Optional on any step: target_text (pick the exact element inside ref), "
-    "wait_for_url, wait_for_text, settle_ms, narration_timing."
+    "wait_for_url, wait_for_text, wait_timeout_ms (default 8000, up to 60000 for a "
+    "slow answer), settle_ms, narration_timing."
 )
 
 
@@ -83,6 +88,7 @@ def action_json_schema() -> dict[str, Any]:
             "wait_for_url": {"type": "string"},
             "wait_for_text": {"type": "string"},
             "settle_ms": {"type": "integer", "minimum": 0, "maximum": 10000},
+            "wait_timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 60000},
             "narration_timing": {"type": "string", "enum": ["before_action", "after_action", "after_settle"]},
         },
     }

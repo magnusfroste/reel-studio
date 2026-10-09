@@ -65,6 +65,21 @@ def test_follow_pans_only_to_targets_outside_the_frame():
     assert camera.needs_follow(inside) is None
     outside = {"x": 1500, "y": 900, "width": 100, "height": 40}
     assert camera.needs_follow(outside) == (1550, 920)
+    # Half in frame is not in frame.
+    straddling = {"x": 900, "y": 250, "width": 120, "height": 40}
+    assert camera.needs_follow(straddling) == (960, 270)
+
+
+def test_a_wide_target_is_framed_from_its_start():
+    camera = Camera(1920, 1080)
+    # The test result panel: full width, its words at the left.
+    panel = {"x": 330, "y": 640, "width": 1530, "height": 80}
+    cx, cy = camera.aim(panel, 2.0)
+    view_w = 1920 / 2.0
+    assert cx - view_w / 2 < 330 < cx - view_w / 2 + view_w * 0.1  # first words in frame
+    assert cy == 680
+    # A target that fits is centred.
+    assert camera.aim({"x": 100, "y": 100, "width": 200, "height": 50}, 2.0) == (200, 125)
 
 
 def test_zoompan_is_skipped_without_moves_and_scoped_to_its_segment():

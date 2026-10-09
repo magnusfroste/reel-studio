@@ -480,10 +480,30 @@ def begin_shot(
     focus_ref: str | None = None,
     focus_text: str | None = None,
 ) -> dict[str, Any]:
-    """Persist a director's planned shot for a session."""
+    """Persist a director's planned shot for a session.
+
+    Declaring a shot_id again replaces it and sets it back to planned, so a
+    director can correct a shot instead of hitting a UNIQUE constraint.
+    """
     init_schema()
     now = _now()
     with _lock, _connect() as connection:
+        updated = connection.execute(
+            """
+            UPDATE shots
+            SET intent = ?, framing = ?, zoom = ?, focus_ref = ?, focus_text = ?,
+                status = 'planned', verified = NULL, verification_note = NULL,
+                updated_at = ?
+            WHERE session_id = ? AND shot_id = ?
+            """,
+            (intent, framing, zoom, focus_ref, focus_text, now, session_id, shot_id),
+        ).rowcount
+        if updated:
+            row = connection.execute(
+                "SELECT * FROM shots WHERE session_id = ? AND shot_id = ?",
+                (session_id, shot_id),
+            ).fetchone()
+            return dict(row)
         next_idx = connection.execute(
             "SELECT COALESCE(MAX(shot_idx) + 1, 0) FROM shots WHERE session_id = ?",
             (session_id,),

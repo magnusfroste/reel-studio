@@ -271,3 +271,73 @@ def test_a_session_profile_never_offers_to_save_a_password(tmp_path):
     assert prefs["profile"]["password_manager_enabled"] is False
     assert prefs["translate"]["enabled"] is False
     assert "--no-first-run" in screen_geometry(1920, 1080)["browser_args"]
+
+
+class FocusSession(FakeSession):
+    """A live session whose page never shows the focus text."""
+
+    camera = None
+
+    async def assert_visible(self, text):
+        return {"visible": False, "box": None, "in_viewport": False}
+
+    async def set_shot(self, framing, zoom=None, focus_ref=None, focus_text=None):
+        return {"camera_zoom": 1.0}
+
+
+def test_an_earlier_shot_verifies_after_the_page_has_moved_on(mods):
+    server, store, _ = mods
+    _new_session(store, "s-verify")
+    server.sessions["s-verify"] = FocusSession()
+    try:
+        asyncio.run(server.begin_shot("s-verify", "card", "The template card", "medium",
+                                      focus_text="Hand the camera to an agent"))
+        asyncio.run(server.begin_shot("s-verify", "close", "Back on the dashboard", "wide"))
+        # The card's page is gone; verifying it no longer needs it on screen.
+        result = asyncio.run(server.verify_shot("s-verify", "card", True))
+        assert result["shot"]["status"] == "verified"
+        # The current shot is still checked against the live page.
+        asyncio.run(server.begin_shot("s-verify", "now", "A detail", "close", focus_text="Missing"))
+        result = asyncio.run(server.verify_shot("s-verify", "now", True))
+        assert result["shot"]["status"] == "needs_review"
+    finally:
+        server.sessions.pop("s-verify", None)
+
+
+def test_a_shot_can_be_declared_again(mods):
+    server, store, _ = mods
+    _new_session(store, "s-redeclare")
+    asyncio.run(server.begin_shot("s-redeclare", "a", "First try", "close", focus_text="x"))
+    store.verify_shot("s-redeclare", "a", False, "missed")
+    again = asyncio.run(server.begin_shot("s-redeclare", "a", "Second try", "medium", focus_text="y"))
+    assert again["ok"] and again["shot"]["status"] == "planned"
+    assert again["shot"]["framing"] == "medium" and again["shot"]["focus_text"] == "y"
+    assert len(store.get_session("s-redeclare")["shots"]) == 1
+
+
+def test_finish_says_which_shot_blocks_it_and_why(mods):
+    server, store, _ = mods
+    _new_session(store, "s-blocked")
+    store.append_step("s-blocked", "click", "button", "https://example.com", "Shop",
+                      "", 0.0, 1.0, None, True, None)
+    asyncio.run(server.begin_shot("s-blocked", "card", "The card", "medium"))
+    store.verify_shot("s-blocked", "card", False, "Focus text not visible: Reel-studio")
+    server.sessions["s-blocked"] = FakeSession()
+    try:
+        result = asyncio.run(server.finish("s-blocked"))
+    finally:
+        server.sessions.pop("s-blocked", None)
+    assert result["error"]["type"] == "shot_review_required"
+    assert "card is needs_review (Focus text not visible: Reel-studio)" in result["error"]["message"]
+    assert "same shot_id" in result["hint"]
+
+
+def test_the_wait_for_a_slow_answer_is_configurable():
+    from pydantic import ValidationError
+    from reel_studio.schema import Action, action_json_schema
+
+    assert Action(type="click", ref="r").wait_timeout_ms == 8000
+    assert Action(type="click", ref="r", wait_timeout_ms=45000).wait_timeout_ms == 45000
+    with pytest.raises(ValidationError):
+        Action(type="click", ref="r", wait_timeout_ms=600000)
+    assert "wait_timeout_ms" in action_json_schema()["properties"]
