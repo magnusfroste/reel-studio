@@ -33,6 +33,10 @@ class Action(BaseModel):
     # Done during the recording but kept out of the video: signing in,
     # dismissing a cookie banner, getting to the first page worth showing.
     offscreen: bool = False
+    # Show everything this step's footage holds until the next step, sped up
+    # by this factor with a small "4×" badge — a wait or a build as a
+    # time-lapse — instead of cutting it out.
+    speed: float = Field(default=1.0, ge=1.0, le=16.0)
     narration_timing: Literal["before_action", "after_action", "after_settle"] = "after_settle"
 
 
@@ -71,7 +75,8 @@ ACTION_CONTRACT = (
     "wait_for_url, wait_for_text, wait_timeout_ms (default 8000, up to 60000 for a "
     "slow answer), settle_ms, narration_timing, quiet (true: silent on purpose, part of "
     "the previous beat; review does not flag it), offscreen (true: done but cut "
-    "from the video — signing in, a cookie banner; no narration)."
+    "from the video — signing in, a cookie banner; no narration), speed (2-16: show "
+    "the step's footage until the next step as a time-lapse instead of cutting it)."
 )
 
 
@@ -103,6 +108,7 @@ def action_json_schema() -> dict[str, Any]:
             "sticky": {"type": "boolean"},
             "quiet": {"type": "boolean"},
             "offscreen": {"type": "boolean"},
+            "speed": {"type": "number", "minimum": 1, "maximum": 16},
             "narration_timing": {"type": "string", "enum": ["before_action", "after_action", "after_settle"]},
         },
     }

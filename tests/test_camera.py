@@ -166,7 +166,7 @@ def test_the_length_estimate_is_the_render_plan_not_the_clock():
     fake = SimpleNamespace(
         timeline=[(10.0, None, 2.0), (400.0, None, 3.0)],
         render_config=RenderConfig(title="T", cta_url="https://example.com"),
-        timeline_floors=[1.0, 1.0],
+        timeline_floors=[1.0, 1.0], timeline_speeds=[1.0, 1.0],
         offscreen_first=False,
     )
     estimate = BrowserSession.estimated_length(fake, 800.0)
@@ -181,7 +181,7 @@ def test_a_shot_moves_the_camera_where_its_footage_starts():
     from reel_studio.engine import BrowserSession
 
     source = inspect.getsource(BrowserSession.act)
-    applied = source.index("self.camera.move(offset, *self.pending_shot)")
+    applied = source.index("self.camera.move(offset, *self.pending_shot")
     assert applied > source.index("offset = action_completed_at")
 
 
@@ -202,3 +202,12 @@ def test_quiet_steps_are_short_and_the_lead_in_can_go():
     assert [round(s.output_duration, 2) for s in segments] == [1.0, 1.4, 0.6, 2.4]
     no_lead, _ = render.plan_segments(steps, 60.0, lead_in=False)
     assert no_lead[0].name == "0000"
+
+
+def test_a_move_can_take_its_own_time_and_a_time_lapse_runs_the_clock_faster():
+    camera = Camera(1920, 1080)
+    assert camera.move(1.0, 2.0, 960, 540, ease=2.5)
+    assert camera.keys[-1]["ease"] == 2.5
+    normal = camera.zoompan(0.0, 10.0, (1920, 1080))
+    fast = camera.zoompan(0.0, 10.0, (1920, 1080), speed=4.0)
+    assert "(0.000+it)" in normal and "it*4.0000" in fast

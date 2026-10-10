@@ -195,7 +195,9 @@ class Camera:
     def moves(self) -> bool:
         return any(key["zoom"] != 1.0 for key in self.keys)
 
-    def zoompan(self, offset: float, source_end: float, size: tuple[int, int], fps: int = 25) -> str | None:
+    def zoompan(
+        self, offset: float, source_end: float, size: tuple[int, int], fps: int = 25, speed: float = 1.0,
+    ) -> str | None:
         """An ffmpeg zoompan filter for one segment of the recording.
 
         The segment starts at ``offset`` on the recording clock; zoompan's
@@ -207,7 +209,9 @@ class Camera:
         """
         if not self.moves():
             return None
-        t = f"({offset:.3f}+it)"
+        # A sped-up segment plays its source `speed` times faster, so one
+        # second of output covers `speed` seconds of the recording's clock.
+        t = f"({offset:.3f}+it*{speed:.4f})" if speed != 1.0 else f"({offset:.3f}+it)"
         base = self.state_at(offset - EASE_SECONDS)
         active = [key for key in self.keys
                   if offset - EASE_SECONDS < key["t"] < source_end]

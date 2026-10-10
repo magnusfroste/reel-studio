@@ -269,6 +269,10 @@ class BrowserSession:
     # A shot declared by begin_shot; the camera moves when its first step
     # starts, since the time between tool calls is cut from the video.
     pending_shot: tuple[float, float | None, float | None] | None = None
+    # How long the pending shot's move takes (begin_shot move_seconds).
+    pending_ease: float = EASE_SECONDS
+    # Each timeline step's speed: above 1, its footage plays as a time-lapse.
+    timeline_speeds: list[float] = field(default_factory=list)
     # A sticky caption on screen: (annotation id, label), redrawn when the
     # camera moves so it stays inside the frame.
     sticky_caption: tuple[str, str] | None = None
@@ -606,6 +610,7 @@ class BrowserSession:
         zoom: float | None = None,
         focus_ref: str | None = None,
         focus_text: str | None = None,
+        move_seconds: float | None = None,
     ) -> dict:
         """Aim the camera for the next step: framing, or an explicit zoom, on a focus.
 
@@ -643,6 +648,7 @@ class BrowserSession:
             else:
                 cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
         self.pending_shot = (level, cx, cy)
+        self.pending_ease = EASE_SECONDS if move_seconds is None else min(max(move_seconds, 0.2), 3.0)
         result: dict = {"camera_zoom": level}
         if self.camera is not None:
             # What the frame will show, in CSS pixels: the centre is clamped so
@@ -883,7 +889,7 @@ class BrowserSession:
                 # straight away, the caption showed at half size and grew with
                 # the zoom; it appears once the move has landed instead.
                 delay_ms = (
-                    action.settle_ms + int(EASE_SECONDS * 1000)
+                    action.settle_ms + int(self.pending_ease * 1000)
                     if self._shot_moves_camera() else 0
                 )
                 annotation_duration = (duration_ms + delay_ms) / 1000
@@ -1137,7 +1143,7 @@ class BrowserSession:
             # the settle — footage the segmented render cuts — so most
             # push-ins reached the video as a jump to the zoomed frame, not a
             # move (found comparing cut boundaries, 2026-10-09).
-            if self.camera.move(offset, *self.pending_shot):
+            if self.camera.move(offset, *self.pending_shot, ease=self.pending_ease):
                 await self._redraw_sticky_caption()
             self.pending_shot = None
         hold_duration = annotation_hold_seconds(duration, annotation_duration)
@@ -1152,6 +1158,7 @@ class BrowserSession:
             self.timeline.append((offset, clip, hold_duration))
             self.timeline_pages.append(self.page.url)
             self.timeline_floors.append(QUIET_FLOOR if action.quiet else SEGMENT_FLOOR)
+            self.timeline_speeds.append(action.speed)
         if hold_duration:
             elapsed = time.monotonic() - (self.t0 + offset)
             padding_applied = elapsed < hold_duration
@@ -1217,7 +1224,7 @@ class BrowserSession:
             return elapsed
         segments, _ = plan_segments(
             self.timeline, max(elapsed, 0.001), self.timeline_floors,
-            not self.offscreen_first,
+            not self.offscreen_first, self.timeline_speeds,
         )
         cards = CARD_DURATION * (
             bool(self.render_config.title.strip())
@@ -1246,7 +1253,7 @@ class BrowserSession:
             result = segmented_render(
                 video, self.timeline, final, self.output_size,
                 self.render_config, self.camera, self.timeline_pages,
-                self.timeline_floors, not self.offscreen_first,
+                self.timeline_floors, not self.offscreen_first, self.timeline_speeds,
             )
             write_storyboard(self.directory, final, result.timeline)
         else:

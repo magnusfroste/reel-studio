@@ -991,6 +991,7 @@ def _render_config(
     music: str,
     transitions: str = "smooth",
     title_background: str = "auto",
+    closing_qr: bool = True,
 ) -> RenderConfig:
     normalized_accent = accent.strip()
     if not re.fullmatch(r"#?[0-9a-fA-F]{6}", normalized_accent):
@@ -1009,6 +1010,7 @@ def _render_config(
         music=normalized_music,
         transitions="cuts" if transitions.strip().lower() == "cuts" else "smooth",
         title_background=_title_background(title_background),
+        closing_qr=bool(closing_qr),
     )
 
 
@@ -1460,6 +1462,13 @@ The screen records from start_session until finish, so plan first and record onc
      as a picture: look before you record the beat.
    - After finish (or rerender), storyboard shows your film as a contact sheet
      with each part's start and length — see it the way a viewer will.
+   - begin_shot(move_seconds=...) sets the pace of a move: 0.3 for a snap onto
+     a button, 2-2.5 for a slow drift under a reflective line.
+   - A long wait need not be cut away: speed=4..16 on the step plays it as a
+     labelled time-lapse (a build, a model thinking).
+   - Edit after finish instead of recording again: edit_step(hidden=true) drops
+     a stray step, hold_seconds lets a result breathe, speed turns a wait into
+     a time-lapse — then rerender.
 8. Keep secrets unreadable: start_session(mask=[CSS selectors]) blurs matching
    elements on every page from the first frame; the mask action blurs one element.
 9. Several controls can share a name (a "Sign In" tab and a "Sign In" button):
@@ -1581,6 +1590,10 @@ async def start_session(
                           "this video, blurred and dimmed under the text, like a hero section. "
                           "solid: the accent colour. Or an https image URL (up to 10 MB)."),
     ] = "auto",
+    closing_qr: Annotated[
+        bool,
+        Field(description="A QR code of cta_url on the closing card (default true): on LinkedIn a link in a video cannot be clicked, but it can be scanned."),
+    ] = True,
     mask: Annotated[
         list[str] | None,
         Field(description="CSS selectors blurred on every page from the first frame, e.g. "
@@ -1644,7 +1657,7 @@ async def start_session(
             "hint": hint,
         }
     render_config = _render_config(
-        title, subtitle, accent, cta_url, cta_text, music, transitions, title_background
+        title, subtitle, accent, cta_url, cta_text, music, transitions, title_background, closing_qr
     )
     session = await BrowserSession.create(
         start_url, width, height, voice, selected_provider, selected_output_size,
@@ -1671,6 +1684,7 @@ async def start_session(
         render_config.music,
         render_config.transitions,
         render_config.title_background,
+        render_config.closing_qr,
     )
     result: dict = {"session_id": session.session_id}
     if others:
@@ -1794,6 +1808,7 @@ async def _run_action(
         parsed_action.offscreen,
         payload.get("annotation_duration") or 0.0,
         payload.get("narration_clip"),
+        parsed_action.speed,
     )
     return payload, screenshot
 
@@ -1947,6 +1962,10 @@ async def begin_shot(
     ] = None,
     focus_ref: str | None = None,
     focus_text: str | None = None,
+    move_seconds: Annotated[
+        float | None,
+        Field(description="How long the camera move takes: 0.2 (a snap) to 3 (a slow drift). Default 1."),
+    ] = None,
 ) -> dict:
     """Declare a director storyboard shot, and move the camera for it.
 
@@ -1987,6 +2006,7 @@ async def begin_shot(
             framing, zoom,
             focus_ref.strip() if focus_ref else None,
             focus_text.strip() if focus_text else None,
+            move_seconds,
         ))
     return result
 
@@ -2080,6 +2100,34 @@ def _contact_sheet(directory: Path, parts: list[dict]) -> Path | None:
         path.unlink(missing_ok=True)
     listing.unlink(missing_ok=True)
     return sheet if sheet.is_file() else None
+
+
+@mcp.tool()
+async def edit_step(
+    session_id: str,
+    index: Annotated[int, Field(description="The step's index, as storyboard and get_session list it.")],
+    hidden: Annotated[bool | None, Field(description="true leaves the step out of the video; false brings it back.")] = None,
+    hold_seconds: Annotated[float | None, Field(description="Hold the step at least this long (0-20 s): a still beat after a result.")] = None,
+    speed: Annotated[float | None, Field(description="1 plays it as recorded; 2-16 shows all its footage until the next step as a labelled time-lapse.")] = None,
+) -> dict:
+    """Edit one beat of a finished video without recording it again.
+
+    Leave a stray step out, hold a result a little longer, or turn a wait
+    into a time-lapse — then call rerender to cut the video again. Use
+    storyboard to find the step and to see the result.
+    """
+    session, error = _editable_session(session_id)
+    if error:
+        return error
+    if hold_seconds is not None and not 0 <= hold_seconds <= 20:
+        return {"ok": False, "error": {"type": "invalid_edit", "message": "hold_seconds is 0-20"}}
+    if speed is not None and not 1 <= speed <= 16:
+        return {"ok": False, "error": {"type": "invalid_edit", "message": "speed is 1-16"}}
+    step = store.edit_step(session_id, index, hidden, hold_seconds, speed)
+    if step is None:
+        return {"ok": False, "error": {"type": "unknown_step", "message": f"No step {index}"}}
+    return {"ok": True, "step": {k: step.get(k) for k in ("idx", "action_type", "offscreen", "annotation_seconds", "speed")},
+            "hint": "Call rerender(session_id) to cut the video with this edit; storyboard shows the result."}
 
 
 @mcp.tool()
@@ -2226,10 +2274,12 @@ async def rerender(
         session.get("music", "none"),
         session.get("transitions") or "smooth",
         session.get("title_background") or "auto",
+        bool(session.get("closing_qr", 1)),
     )
     video_duration = await asyncio.to_thread(probe_duration, source_video)
     render_pages: list[str] = []
     render_floors: list[float] = []
+    render_speeds: list[float] = []
     lead_in = not (session["steps"] and session["steps"][0].get("offscreen"))
     steps = session["steps"]
     for index, step in enumerate(steps):
@@ -2264,6 +2314,7 @@ async def rerender(
         render_steps.append((offset, clip, step_hold_seconds(step, duration)))
         render_pages.append(step.get("url") or "")
         render_floors.append(QUIET_FLOOR if step.get("quiet") else SEGMENT_FLOOR)
+        render_speeds.append(float(step.get("speed") or 1.0))
     if segmented_render_enabled():
         output_width = session.get("output_width")
         output_height = session.get("output_height")
@@ -2275,7 +2326,7 @@ async def rerender(
         result = await asyncio.to_thread(
             segmented_render, source_video, render_steps, video_path, output_size,
             render_config, Camera.load(output_dir), render_pages,
-            render_floors, lead_in,
+            render_floors, lead_in, render_speeds,
         )
         await asyncio.to_thread(write_storyboard, output_dir, video_path, getattr(result, "timeline", []) or [])
         warnings = result.warnings

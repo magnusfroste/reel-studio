@@ -134,6 +134,8 @@ def init_schema() -> None:
             )
         if "narration_clip" not in columns:
             connection.execute("ALTER TABLE steps ADD COLUMN narration_clip TEXT")
+        if "speed" not in columns:
+            connection.execute("ALTER TABLE steps ADD COLUMN speed REAL NOT NULL DEFAULT 1")
         session_columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
@@ -154,6 +156,7 @@ def init_schema() -> None:
             ("music", "TEXT NOT NULL DEFAULT 'none'"),
             ("transitions", "TEXT NOT NULL DEFAULT 'smooth'"),
             ("title_background", "TEXT NOT NULL DEFAULT 'auto'"),
+            ("closing_qr", "INTEGER NOT NULL DEFAULT 1"),
         ):
             if column not in session_columns:
                 connection.execute(
@@ -206,6 +209,7 @@ def create_session(
     music: str = "none",
     transitions: str = "smooth",
     title_background: str = "auto",
+    closing_qr: bool = True,
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
@@ -214,13 +218,13 @@ def create_session(
             INSERT INTO sessions
                 (id, start_url, status, voice, provider, width, height,
                  output_width, output_height, title, subtitle, accent, cta_url,
-                 cta_text, music, created_at, output_dir, transitions, title_background)
-            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 cta_text, music, created_at, output_dir, transitions, title_background, closing_qr)
+            VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id, _safe_persisted_url(start_url), voice, provider, width, height,
                 output_width, output_height, title, subtitle, accent, cta_url,
-                cta_text, music, _now(), output_dir, transitions, title_background,
+                cta_text, music, _now(), output_dir, transitions, title_background, int(closing_qr),
             ),
         )
 
@@ -242,6 +246,7 @@ def append_step(
     offscreen: bool = False,
     annotation_seconds: float = 0.0,
     narration_clip: str | None = None,
+    speed: float = 1.0,
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
@@ -254,8 +259,8 @@ def append_step(
             INSERT INTO steps
                 (session_id, idx, action_type, target, url, title, narration_text,
                  voice, narration_duration, offset_seconds, screenshot_path, ok,
-                 error_type, created_at, quiet, offscreen, annotation_seconds, narration_clip)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 error_type, created_at, quiet, offscreen, annotation_seconds, narration_clip, speed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -276,6 +281,7 @@ def append_step(
                 int(offscreen),
                 float(annotation_seconds or 0.0),
                 narration_clip,
+                float(speed or 1.0),
             ),
         )
 
@@ -326,6 +332,47 @@ def update_step_narration(
         updated = connection.execute(
             "SELECT * FROM steps WHERE session_id = ? AND idx = ?",
             (session_id, index),
+        ).fetchone()
+    return dict(updated)
+
+
+def edit_step(
+    session_id: str,
+    index: int,
+    hidden: bool | None = None,
+    hold_seconds: float | None = None,
+    speed: float | None = None,
+) -> dict[str, Any] | None:
+    """Change how a recorded step appears in the video; rerender applies it.
+
+    hidden leaves the step out of the video (as if done offscreen), hold sets
+    how long it holds at least (its caption length), speed plays its footage
+    as a time-lapse.
+    """
+    init_schema()
+    with _lock, _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM steps WHERE session_id = ? AND idx = ?", (session_id, index)
+        ).fetchone()
+        if row is None:
+            return None
+        if hidden is not None:
+            connection.execute(
+                "UPDATE steps SET offscreen = ? WHERE session_id = ? AND idx = ?",
+                (int(hidden), session_id, index),
+            )
+        if hold_seconds is not None:
+            connection.execute(
+                "UPDATE steps SET annotation_seconds = ? WHERE session_id = ? AND idx = ?",
+                (float(hold_seconds), session_id, index),
+            )
+        if speed is not None:
+            connection.execute(
+                "UPDATE steps SET speed = ? WHERE session_id = ? AND idx = ?",
+                (float(speed), session_id, index),
+            )
+        updated = connection.execute(
+            "SELECT * FROM steps WHERE session_id = ? AND idx = ?", (session_id, index)
         ).fetchone()
     return dict(updated)
 

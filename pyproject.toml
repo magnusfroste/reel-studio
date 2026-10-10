@@ -13,6 +13,7 @@ dependencies = [
   "edge-tts>=7.2.8,<8",
   "pydantic>=2.13.4,<3",
   "uvicorn>=0.51,<1",
+  "segno>=1.6,<2",
 ]
 
 [project.optional-dependencies]

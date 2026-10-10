@@ -219,3 +219,48 @@ def test_the_render_records_where_each_part_landed(tmp_path, transitions):
     parts = render.write_storyboard(tmp_path, out, result.timeline)
     assert all((tmp_path / "storyboard" / p["frame"]).is_file() for p in parts)
     assert render.read_storyboard(tmp_path) == parts
+
+
+def test_a_time_lapse_keeps_all_its_footage_sped_up():
+    steps = [(0.0, None, 0.0), (1.0, None, 0.0), (21.0, None, 2.0)]
+    plain, _ = render.plan_segments(steps, 25.0, lead_in=False)
+    fast, _ = render.plan_segments(steps, 25.0, lead_in=False, speeds=[1, 8, 1])
+    # As recorded, the wait is cut to the step's floor; as a time-lapse all
+    # twenty seconds are shown, eight times faster.
+    assert plain[1].source_duration < 20
+    assert fast[1].source_duration == pytest.approx(20.0)
+    assert fast[1].output_duration == pytest.approx(2.5)
+    assert fast[1].speed == 8
+    # A line longer than the sped-up footage still gets its time.
+    narrated, _ = render.plan_segments([(0.0, None, 6.0), (4.0, None, 0.0)], 8.0, lead_in=False, speeds=[4, 1])
+    assert narrated[0].output_duration >= 6.0
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+def test_a_time_lapse_segment_lasts_its_planned_length(tmp_path):
+    source = _clip(tmp_path / "s.mp4", "teal", 8.0)
+    out = render._render_video_segment(source, 0.0, 8.0, 2.0, tmp_path / "seg.mp4", speed=4.0)
+    assert render.probe_duration(out) == pytest.approx(2.0, abs=0.12)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+def test_the_closing_card_carries_a_qr_code_of_the_link(tmp_path):
+    pytest.importorskip("segno")
+    qr = render.make_qr("https://github.com/magnusfroste/agenthotel", tmp_path / "qr.png")
+    assert qr is not None and qr.is_file()
+    plain = tmp_path / "plain.mp4"
+    with_qr = tmp_path / "qr.mp4"
+    config = render.RenderConfig(cta_url="https://example.com", closing_qr=False)
+    render._closing_card(plain, 640, 360, config, None, tmp_path)
+    render._closing_card(with_qr, 640, 360, render.RenderConfig(cta_url="https://example.com"), None, tmp_path)
+    assert render.probe_duration(with_qr) == pytest.approx(render.CARD_DURATION, abs=0.1)
+
+    def corner(path):
+        # Mean luma of the bottom-right corner, where the code sits.
+        data = subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-ss", "1", "-i", str(path), "-frames:v", "1",
+             "-vf", "crop=60:60:640-100:360-100,format=gray", "-f", "rawvideo", "-"],
+            capture_output=True, check=True).stdout
+        return sum(data) / len(data)
+
+    assert corner(with_qr) > corner(plain) + 40  # white quiet zone on a dark card
