@@ -31,6 +31,7 @@ from .render import (
     probe_duration,
     segmented_render,
     segmented_render_enabled,
+    write_storyboard,
     RenderConfig,
     start_recording,
     stop_recording,
@@ -779,6 +780,36 @@ class BrowserSession:
             view = self.camera.view()
         return view if view["zoom"] > 1.0 else None
 
+    async def frame_preview(self) -> tuple[Path | None, dict | None]:
+        """A still of what the next shot will show: the pending shot's frame,
+        or the current one, cropped from the live page.
+
+        Taken at the capture density with a clip — not scale="css", which
+        flickers the live page (see capture_screenshot) — and scaled to 960 px.
+        """
+        if self.camera is None:
+            return None, None
+        if self.pending_shot is not None:
+            level, cx, cy = self.pending_shot
+            _, current_cx, current_cy = self.camera.final_state()
+            state = (max(level, 1.0), current_cx if cx is None else cx, current_cy if cy is None else cy)
+            frame = self.camera.view(state if state[0] > 1.0 else (1.0, 0.0, 0.0))
+        else:
+            frame = self.camera.view()
+        raw = self.directory / f"preview-{int(time.time() * 1000)}.raw.jpg"
+        out = raw.with_name(raw.name.replace(".raw", ""))
+        await self.page.screenshot(
+            path=str(raw), type="jpeg", quality=85,
+            clip={"x": frame["x"], "y": frame["y"], "width": frame["w"], "height": frame["h"]},
+        )
+        await asyncio.to_thread(
+            subprocess.run,
+            ["ffmpeg", "-loglevel", "error", "-y", "-i", str(raw), "-vf", "scale=960:-2", "-q:v", "4", str(out)],
+            check=True,
+        )
+        raw.unlink(missing_ok=True)
+        return out, {k: round(frame[k]) for k in ("x", "y", "w", "h")} | {"zoom": round(frame["zoom"], 2)}
+
     async def assert_visible(self, text: str) -> dict:
         target = await self._visible_text_target(text)
         if target is None:
@@ -1212,11 +1243,12 @@ class BrowserSession:
         if self.camera is not None:
             self.camera.save(self.directory)
         if segmented_render_enabled():
-            segmented_render(
+            result = segmented_render(
                 video, self.timeline, final, self.output_size,
                 self.render_config, self.camera, self.timeline_pages,
                 self.timeline_floors, not self.offscreen_first,
             )
+            write_storyboard(self.directory, final, result.timeline)
         else:
             mux_narration(
                 video,

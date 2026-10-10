@@ -34,6 +34,9 @@ from .render import (
     rerender_narration,
     segmented_render,
     segmented_render_enabled,
+    read_storyboard,
+    write_storyboard,
+    STORYBOARD_DIR,
     QUIET_FLOOR,
     SEGMENT_FLOOR,
 )
@@ -677,6 +680,25 @@ def landing_page(base_url: str = "/") -> str:
     )
 
 
+def _storyboard_by_step(session: dict) -> dict[int, dict]:
+    """Each step's part of the finished video — start, length, still — by
+    step index, from the storyboard the last render wrote. Steps that are not
+    in the video (offscreen, failed) have none."""
+    video_path = session.get("video_path")
+    if not video_path:
+        return {}
+    parts = read_storyboard(Path(video_path).parent)
+    visible = [
+        step for step in session.get("steps", [])
+        if step.get("offset_seconds") is not None and not step.get("offscreen")
+    ]
+    by_step: dict[int, dict] = {}
+    for part in parts:
+        if part.get("kind") == "step" and part.get("step") is not None and part["step"] < len(visible):
+            by_step[visible[part["step"]]["idx"]] = part
+    return by_step
+
+
 def watch_page(session_id: str, base_url: str = "/") -> str | None:
     """Render a dedicated theater and watch view for a single finished session."""
     session = store.get_session(session_id)
@@ -687,28 +709,50 @@ def watch_page(session_id: str, base_url: str = "/") -> str | None:
     duration = format_duration(session.get("duration_seconds"))
     finished_at = session.get("finished_at") or "Recently finished"
     steps = session.get("steps", [])
-    
+    in_video = _storyboard_by_step(session)
+
     step_items = []
     for step in steps:
         idx = step.get("idx", 0) + 1
         narration = str(step.get("narration_text") or "")
         action_type = str(step.get("action_type") or "step")
         target = str(step.get("target") or "")
-        try:
-            offset_seconds = float(step.get("offset_seconds") or 0.0)
-        except (TypeError, ValueError):
-            offset_seconds = 0.0
-        offset = f"{offset_seconds:.1f}s"
+        part = in_video.get(step.get("idx"))
+        if step.get("offscreen") or (in_video and part is None):
+            # Set-up done off camera (signing in) or a failed attempt: listed,
+            # but quietly, since the viewer never saw it.
+            step_items.append(
+                f"""<li class="sb-row sb-hidden"><span class="muted">Step {idx}: {html.escape(action_type)} — not in the video</span></li>"""
+            )
+            continue
         # Outside the f-string: a backslash inside an f-string expression is a
         # SyntaxError before Python 3.12, and CI runs 3.10.
         narration_html = html.escape(narration) if narration else '<span class="muted">(No narration)</span>'
+        if part:
+            at = part["start"]
+            clock = f"{int(at // 60)}:{at % 60:04.1f}"
+            still = (
+                f'<img class="sb-still" loading="lazy" alt="" src="/videos/{session_id}/storyboard/{html.escape(part["frame"])}">'
+                if part.get("frame") else '<div class="sb-still"></div>'
+            )
+            seek = f' data-seek="{at:.2f}" title="Play from here"'
+        else:
+            # A video rendered before storyboards: the step's recording time.
+            try:
+                clock = f"{float(step.get('offset_seconds') or 0.0):.1f}s"
+            except (TypeError, ValueError):
+                clock = ""
+            still, seek = "", ""
         step_items.append(
-            f"""<li style="margin-bottom:12px; padding:10px; background:#1b2130; border-radius:8px;">
-                <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                    <strong style="color:#8ea7ff;">Step {idx}: {html.escape(action_type)} {html.escape(target)}</strong>
-                    <span class="muted">{offset}</span>
+            f"""<li class="sb-row"{seek}>
+                {still}
+                <div class="sb-text">
+                    <div class="sb-head">
+                        <strong>Step {idx}: {html.escape(action_type)} {html.escape(target)}</strong>
+                        <span class="muted">{clock}</span>
+                    </div>
+                    <p>{narration_html}</p>
                 </div>
-                <p style="margin:0; font-size:0.95rem; color:#dbe2ff;">{narration_html}</p>
             </li>"""
         )
     steps_html = "".join(step_items) if step_items else '<li class="muted">No step breakdown recorded.</li>'
@@ -737,9 +781,31 @@ def watch_page(session_id: str, base_url: str = "/") -> str | None:
     </div>
 
     <h2>Storyboard & Narration Script</h2>
+    <style>
+      .sb-row {{ display:flex; gap:14px; align-items:flex-start; margin-bottom:10px; padding:10px; background:#1b2130; border-radius:10px; }}
+      .sb-row[data-seek] {{ cursor:pointer; }}
+      .sb-row[data-seek]:hover {{ background:#222a3d; }}
+      .sb-still {{ width:192px; aspect-ratio:16/9; flex-shrink:0; border-radius:6px; background:#0d111a; object-fit:cover; }}
+      .sb-text {{ flex:1; min-width:0; }}
+      .sb-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:4px; }}
+      .sb-head strong {{ color:#8ea7ff; overflow-wrap:anywhere; }}
+      .sb-text p {{ margin:0; font-size:0.95rem; color:#dbe2ff; }}
+      .sb-hidden {{ padding:6px 10px; background:transparent; font-size:0.85rem; }}
+      @media (max-width: 640px) {{ .sb-row {{ flex-direction:column; }} .sb-still {{ width:100%; }} }}
+    </style>
     <ol style="list-style:none; padding:0;">
       {steps_html}
     </ol>
+    <script>
+      document.addEventListener("click", (event) => {{
+        const row = event.target.closest("[data-seek]");
+        const video = document.querySelector("video");
+        if (!row || !video) return;
+        video.currentTime = parseFloat(row.dataset.seek);
+        video.play();
+        video.scrollIntoView({{ behavior: "smooth", block: "center" }});
+      }});
+    </script>
     {video_admin_script()}
     """
     return page_shell(
@@ -1390,6 +1456,10 @@ The screen records from start_session until finish, so plan first and record onc
      the time between your calls is cut, so it does not count.
    - verify_shot right after its beat. A shot can be declared again with the
      same shot_id to correct it.
+   - preview_shot after begin_shot shows the exact frame the camera will hold,
+     as a picture: look before you record the beat.
+   - After finish (or rerender), storyboard shows your film as a contact sheet
+     with each part's start and length — see it the way a viewer will.
 8. Keep secrets unreadable: start_session(mask=[CSS selectors]) blurs matching
    elements on every page from the first frame; the mask action blurs one element.
 9. Several controls can share a name (a "Sign In" tab and a "Sign In" button):
@@ -1555,6 +1625,24 @@ async def start_session(
         mask_stylesheet(mask)
     except ValueError as exc:
         return {"ok": False, "error": {"type": "invalid_mask", "message": str(exc)}}
+    # Speak one word in the chosen voice before anything records. A take
+    # whose voice failed mid-way cost an agent 18 minutes for 71 seconds and
+    # came back with lines missing (2026-10-10); failing here costs nothing.
+    try:
+        with tempfile.TemporaryDirectory(prefix="voice-check-") as scratch:
+            await synthesize("Ready.", voice, Path(scratch), selected_provider)
+    except Exception as exc:
+        hint = (
+            'Try provider="elevenlabs" with a voice from list_voices(provider="elevenlabs"), '
+            "or start again in a few minutes."
+            if selected_provider == "edge" and elevenlabs_configured()
+            else "Check the voice id with list_voices, or start again in a few minutes."
+        )
+        return {
+            "ok": False,
+            "error": {"type": "voice_unavailable", "message": f"The voice {voice!r} could not speak: {exc}"},
+            "hint": hint,
+        }
     render_config = _render_config(
         title, subtitle, accent, cta_url, cta_text, music, transitions, title_background
     )
@@ -1904,6 +1992,97 @@ async def begin_shot(
 
 
 @mcp.tool()
+async def preview_shot(session_id: str) -> CallToolResult:
+    """See the frame the next shot will show, before you record the beat.
+
+    After begin_shot: a still of exactly what the camera will frame (zoom,
+    clamping and all), cut from the live page. Without a pending shot, the
+    current frame. Check that the detail your line names is in it.
+    """
+    _touch(session_id)
+    live = sessions.get(session_id)
+    if live is None:
+        return feedback_result(_unknown_session(session_id))
+    try:
+        still, frame = await live.frame_preview()
+    except Exception as exc:
+        return feedback_result({"ok": False, "error": {"type": "preview_failed", "message": str(exc)}})
+    return feedback_result({"ok": True, "camera_frame": frame, "pending_shot": live.pending_shot is not None}, still)
+
+
+@mcp.tool()
+async def storyboard(session_id: str) -> CallToolResult:
+    """The finished video as a contact sheet: one still per part, with where
+    it starts and how long it lasts.
+
+    Read it after finish or rerender to see your film the way a viewer will:
+    a part that holds too long, a push-in that missed, a beat with no
+    picture change. Parts are numbered; each step part names its step and
+    its line.
+    """
+    session = store.get_session(session_id)
+    if session is None or not session.get("video_path"):
+        return feedback_result({"ok": False, "error": {"type": "not_finished", "message": "Finish the session first"}})
+    directory = Path(session["video_path"]).parent
+    parts = read_storyboard(directory)
+    if not parts:
+        return feedback_result({
+            "ok": False,
+            "error": {"type": "no_storyboard", "message": "This video was rendered before storyboards existed."},
+            "hint": "rerender(session_id) builds one.",
+        })
+    visible = [s for s in session.get("steps", []) if s.get("offset_seconds") is not None and not s.get("offscreen")]
+    rows = []
+    for number, part in enumerate(parts):
+        row = {"part": number, "kind": part["kind"], "start": part["start"], "duration": part["duration"]}
+        if part["kind"] == "step" and part.get("step") is not None and part["step"] < len(visible):
+            step = visible[part["step"]]
+            row.update({"step": step["idx"], "action": step.get("action_type"),
+                        "narration": (step.get("narration_text") or "")[:100]})
+        if part["duration"] > 8:
+            row["note"] = "holds over 8 s — is something changing on screen?"
+        rows.append(row)
+    sheet = await asyncio.to_thread(_contact_sheet, directory, parts)
+    return feedback_result({"ok": True, "duration": session.get("duration_seconds"), "parts": rows}, sheet)
+
+
+def _contact_sheet(directory: Path, parts: list[dict]) -> Path | None:
+    """Tile the storyboard stills, each labelled with its part number and times."""
+    frames_dir = directory / STORYBOARD_DIR
+    labelled = []
+    for number, part in enumerate(parts):
+        if not part.get("frame") or not (frames_dir / part["frame"]).is_file():
+            continue
+        label = f"{number}  {part['start']:.1f}s  +{part['duration']:.1f}s"
+        out = frames_dir / f"label-{number:03d}.jpg"
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y", "-i", str(frames_dir / part["frame"]),
+             "-vf", (f"scale=320:180,drawbox=x=0:y=0:w=iw:h=26:color=black@0.65:t=fill,"
+                     f"drawtext=fontfile={FONT_PATH}:text='{label}':fontcolor=white:fontsize=15:x=8:y=5"),
+             str(out)],
+            check=False,
+        )
+        if out.is_file():
+            labelled.append(out)
+    if not labelled:
+        return None
+    columns = 4
+    rows = (len(labelled) + columns - 1) // columns
+    listing = frames_dir / "labels.txt"
+    listing.write_text("".join(f"file '{p}'\n" for p in labelled))
+    sheet = frames_dir / "sheet.jpg"
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
+         "-vf", f"tile={columns}x{rows}:padding=4:color=0x0d111a", "-frames:v", "1", "-q:v", "4", str(sheet)],
+        check=False,
+    )
+    for path in labelled:
+        path.unlink(missing_ok=True)
+    listing.unlink(missing_ok=True)
+    return sheet if sheet.is_file() else None
+
+
+@mcp.tool()
 async def verify_shot(
     session_id: str,
     shot_id: str,
@@ -2098,6 +2277,7 @@ async def rerender(
             render_config, Camera.load(output_dir), render_pages,
             render_floors, lead_in,
         )
+        await asyncio.to_thread(write_storyboard, output_dir, video_path, getattr(result, "timeline", []) or [])
         warnings = result.warnings
         duration = result.duration
     else:
@@ -2548,6 +2728,23 @@ async def api_delete_video(request: Request) -> Response:
 
 
 @mcp.custom_route(
+    "/videos/{session_id}/storyboard/{name}",
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+)
+async def storyboard_still(request: Request) -> Response:
+    """A still from a finished video's storyboard (public, like the video)."""
+    session_id = request.path_params["session_id"]
+    name = request.path_params["name"]
+    if not re.fullmatch(r"[0-9a-f]+", session_id) or not re.fullmatch(r"(part-\d{3}|sheet)\.jpg", name):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    path = output_root() / session_id / STORYBOARD_DIR / name
+    if not path.is_file():
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@mcp.custom_route(
     "/videos/{session_id}/video.mp4",
     methods=["GET", "HEAD"],
     include_in_schema=False,
@@ -2571,7 +2768,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self.token = token
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        public_video = re.fullmatch(r"/videos/[^/]+/video\.mp4", request.url.path)
+        public_video = re.fullmatch(r"/videos/[^/]+/(video\.mp4|storyboard/[a-z0-9-]+\.jpg)", request.url.path)
         public_watch = re.fullmatch(r"/watch/[^/]+", request.url.path)
         if request.method in {"GET", "HEAD"} and (
             request.url.path in {

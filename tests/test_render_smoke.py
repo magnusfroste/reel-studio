@@ -201,3 +201,21 @@ def test_only_public_https_images_are_fetched():
     assert not render._public_https("https://127.0.0.1/a.png")
     assert not render._public_https("https://localhost/a.png")
     assert not render._public_https("file:///etc/passwd")
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+@pytest.mark.parametrize("transitions", ["smooth", "cuts"])
+def test_the_render_records_where_each_part_landed(tmp_path, transitions):
+    source = _clip(tmp_path / "screen.mp4", "teal", 6.0)
+    config = render.RenderConfig(title="T", cta_url="https://example.com", transitions=transitions,
+                                 title_background="solid")
+    out = tmp_path / "video.mp4"
+    result = render.segmented_render(source, [(1.0, None, 1.5), (3.0, None, 1.0)], out, (320, 176), config)
+    kinds = [p["kind"] for p in result.timeline]
+    assert kinds == ["intro", "lead", "step", "step", "outro"]
+    assert [p["step"] for p in result.timeline if p["kind"] == "step"] == [0, 1]
+    starts = [p["start"] for p in result.timeline]
+    assert starts == sorted(starts) and result.timeline[-1]["start"] < result.duration
+    parts = render.write_storyboard(tmp_path, out, result.timeline)
+    assert all((tmp_path / "storyboard" / p["frame"]).is_file() for p in parts)
+    assert render.read_storyboard(tmp_path) == parts
