@@ -83,6 +83,32 @@ async def synthesize(
     if selected == "elevenlabs":
         await _synthesize_elevenlabs(text, voice, path)
     else:
-        communicator = edge_tts.Communicate(text, voice)
-        await communicator.save(str(path))
+        await _synthesize_edge(text, voice, path)
     return path
+
+
+# Microsoft's free endpoint refuses a share of requests with 403 for minutes at
+# a time from some hosts — it held up an agent's take for seven minutes and
+# failed a rerender outright (2026-10-10); the next request often succeeds.
+EDGE_ATTEMPTS = 5
+EDGE_BACKOFF_SECONDS = (2, 4, 8, 16)
+
+
+async def _synthesize_edge(text: str, voice: str, path: Path) -> None:
+    last_error: Exception | None = None
+    for attempt in range(EDGE_ATTEMPTS):
+        try:
+            communicator = edge_tts.Communicate(text, voice)
+            await communicator.save(str(path))
+            if path.is_file() and path.stat().st_size > 0:
+                return
+            last_error = TTSProviderError("Edge returned no audio")
+        except Exception as exc:  # aiohttp's 403, a dropped socket, no audio
+            last_error = exc
+        path.unlink(missing_ok=True)
+        if attempt < len(EDGE_BACKOFF_SECONDS):
+            await asyncio.sleep(EDGE_BACKOFF_SECONDS[attempt])
+    raise TTSProviderError(
+        f"Edge TTS failed {EDGE_ATTEMPTS} times; the free endpoint is refusing "
+        f"this host for now. Last error: {last_error}"
+    )

@@ -1143,6 +1143,9 @@ class BrowserSession:
             "title": await self.page.title(),
             "changed": self.page.url != before_url,
             "narration_duration": round(duration, 3),
+            # The clip's file name in the session directory, so a rerender
+            # can reuse it while the line is unchanged.
+            **({"narration_clip": clip.name} if clip else {}),
             "visual_hold_duration": round(hold_duration, 3),
             "padding_applied": padding_applied,
             "refs_stale": self.refs_stale,

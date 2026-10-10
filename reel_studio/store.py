@@ -132,6 +132,8 @@ def init_schema() -> None:
             connection.execute(
                 "ALTER TABLE steps ADD COLUMN annotation_seconds REAL NOT NULL DEFAULT 0"
             )
+        if "narration_clip" not in columns:
+            connection.execute("ALTER TABLE steps ADD COLUMN narration_clip TEXT")
         session_columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
@@ -239,6 +241,7 @@ def append_step(
     quiet: bool = False,
     offscreen: bool = False,
     annotation_seconds: float = 0.0,
+    narration_clip: str | None = None,
 ) -> None:
     init_schema()
     with _lock, _connect() as connection:
@@ -251,8 +254,8 @@ def append_step(
             INSERT INTO steps
                 (session_id, idx, action_type, target, url, title, narration_text,
                  voice, narration_duration, offset_seconds, screenshot_path, ok,
-                 error_type, created_at, quiet, offscreen, annotation_seconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 error_type, created_at, quiet, offscreen, annotation_seconds, narration_clip)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -272,6 +275,7 @@ def append_step(
                 int(quiet),
                 int(offscreen),
                 float(annotation_seconds or 0.0),
+                narration_clip,
             ),
         )
 
@@ -282,6 +286,7 @@ def update_step_narration(
     narration: str,
     voice: str | None = None,
     narration_duration: float | None = None,
+    narration_clip: str | None = None,
 ) -> dict[str, Any] | None:
     init_schema()
     with _lock, _connect() as connection:
@@ -291,6 +296,14 @@ def update_step_narration(
         ).fetchone()
         if row is None:
             return None
+        # The stored clip stays valid only while its words and voice do; a new
+        # clip passed in replaces it.
+        unchanged = row["narration_text"] == narration and (voice is None or voice == row["voice"])
+        clip = narration_clip or (row["narration_clip"] if unchanged else None)
+        connection.execute(
+            "UPDATE steps SET narration_clip = ? WHERE session_id = ? AND idx = ?",
+            (clip, session_id, index),
+        )
         if narration_duration is None:
             connection.execute(
                 """
