@@ -516,3 +516,52 @@ def test_rerender_reuses_an_unchanged_clip(mods, monkeypatch, tmp_path):
     # Changing the words invalidates the clip.
     store.update_step_narration("s-reuse", 0, "Something else.")
     assert store.get_session("s-reuse")["steps"][0]["narration_clip"] is None
+
+
+def test_list_voices_can_list_elevenlabs(mods, monkeypatch):
+    server, _, _ = mods
+
+    async def fake_voices():
+        return [{"voice": "abc", "name": "Brian", "gender": "Male", "accent": "american",
+                 "age": "middle aged", "description": "deep", "use_case": "narration", "category": "premade"},
+                {"voice": "def", "name": "Alice", "gender": "Female", "accent": "british",
+                 "age": "", "description": "", "use_case": "", "category": "premade"}]
+
+    monkeypatch.setattr(server, "list_elevenlabs_voices", fake_voices)
+    result = asyncio.run(server.list_voices(gender="male", provider="elevenlabs"))
+    assert result["provider"] == "elevenlabs" and [v["name"] for v in result["voices"]] == ["Brian"]
+    props = _tools(server)["rerender"].inputSchema["properties"]
+    assert "voice" in props and "provider" in props
+
+
+def test_rerender_can_revoice_a_finished_video(mods, monkeypatch, tmp_path):
+    server, store, _ = mods
+    import subprocess
+    from types import SimpleNamespace
+
+    session_dir = tmp_path / "s-revoice"
+    session_dir.mkdir()
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=64x36:r=25:d=6", "-pix_fmt", "yuv420p",
+                    str(session_dir / "screen.mp4")], check=True)
+    (session_dir / "video.mp4").write_bytes((session_dir / "screen.mp4").read_bytes())
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=2", str(session_dir / "narration-a.mp3")], check=True)
+    store.create_session("s-revoice", "https://example.com", "en-US-JennyNeural", 64, 36,
+                         str(session_dir), "edge", None, None, "", "", "#1f2a44", "", "Learn more", "none")
+    store.append_step("s-revoice", "caption", None, "https://example.com", "t", "Hello there.", 2.0, 1.0,
+                      None, True, None, "en-US-JennyNeural", narration_clip="narration-a.mp3")
+    store.finish_session("s-revoice", str(session_dir / "video.mp4"), None, 5.0)
+
+    spoken = []
+
+    async def fake_synthesize(text, voice, output_dir, provider=None):
+        spoken.append((voice, provider))
+        return session_dir / "narration-a.mp3"
+
+    monkeypatch.setattr(server, "synthesize", fake_synthesize)
+    monkeypatch.setattr(server, "segmented_render", lambda *a, **k: SimpleNamespace(warnings=[], duration=4.0))
+    assert asyncio.run(server.rerender("s-revoice", voice="en-GB-RyanNeural", provider="edge"))["ok"]
+    assert spoken == [("en-GB-RyanNeural", "edge")]
+    session = store.get_session("s-revoice")
+    assert session["voice"] == "en-GB-RyanNeural" and session["steps"][0]["voice"] == "en-GB-RyanNeural"

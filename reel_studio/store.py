@@ -330,6 +330,15 @@ def update_step_narration(
     return dict(updated)
 
 
+def update_session_voice(session_id: str, voice: str, provider: str) -> None:
+    init_schema()
+    with _lock, _connect() as connection:
+        connection.execute(
+            "UPDATE sessions SET voice = ?, provider = ? WHERE id = ?",
+            (voice, provider, session_id),
+        )
+
+
 def update_session_duration(session_id: str, duration_seconds: float) -> None:
     init_schema()
     with _lock, _connect() as connection:
