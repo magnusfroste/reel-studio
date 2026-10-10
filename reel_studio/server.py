@@ -39,7 +39,14 @@ from .render import (
 )
 from .camera import MAX_ZOOM, Camera
 from .schema import ACTION_CONTRACT, ACTION_TYPES, FRAMINGS, Action, action_json_schema, mask_stylesheet
-from .tts import TTSProviderError, normalize_provider, synthesize, validate_provider
+from .tts import (
+    TTSProviderError,
+    elevenlabs_configured,
+    list_elevenlabs_voices,
+    normalize_provider,
+    synthesize,
+    validate_provider,
+)
 
 
 LOCAL_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -1341,7 +1348,10 @@ The screen records from start_session until finish, so plan first and record onc
    not on a login form — the first seconds decide whether anyone watches.
    The voice is yours to choose: list_voices(language="en") lists them with
    their gender and personality; pass one as start_session(voice=...). It
-   stays for the whole video.
+   stays for the whole video. When list_voices says elevenlabs_available,
+   list_voices(provider="elevenlabs") gives natural voices — use
+   start_session(provider="elevenlabs", voice=<id>). rerender(voice=...,
+   provider=...) re-voices a finished video without recording it again.
    The title and closing cards are a hero section by default: a still from
    your own video, blurred and dimmed under the text (title_background="auto").
    Pass an https image URL for a brand image, or "solid" for the accent colour.
@@ -1407,20 +1417,41 @@ _VOICE_CACHE: list[dict] = []
 async def list_voices(
     language: Annotated[
         str,
-        Field(description="A language or locale prefix: \"en\", \"en-GB\", \"sv\". Empty lists all."),
+        Field(description="A language or locale prefix: \"en\", \"en-GB\", \"sv\". Empty lists all. Edge only; ElevenLabs voices speak every language."),
     ] = "en",
     gender: Annotated[
         str,
         Field(description="Female, Male, or empty for both."),
     ] = "",
+    provider: Annotated[
+        str,
+        Field(description="edge (free, default) or elevenlabs (natural voices; needs ELEVENLABS_API_KEY on this reel-studio).",
+              json_schema_extra={"enum": ["edge", "elevenlabs"]}),
+    ] = "edge",
 ) -> dict:
     """List the narration voices start_session(voice=...) accepts.
 
     The free Edge provider has several hundred neural voices across languages;
     every session used to get the default en-US-JennyNeural because nothing
-    told an agent what else there was. Pick one that suits the audience and
-    the brand — and keep it for the whole video.
+    told an agent what else there was. With an ElevenLabs key on this
+    reel-studio, provider="elevenlabs" lists the account's voices — pass one's
+    "voice" id with start_session(provider="elevenlabs", voice=...). Pick one
+    that suits the audience and the brand — and keep it for the whole video.
     """
+    wanted_gender = gender.strip().lower()
+    if provider.strip().lower() == "elevenlabs":
+        try:
+            voices = await list_elevenlabs_voices()
+        except TTSProviderError as exc:
+            return {"ok": False, "error": {"type": "voices_unavailable", "message": str(exc)}}
+        matches = [v for v in voices if not wanted_gender or v["gender"].lower() == wanted_gender]
+        return {
+            "ok": True,
+            "provider": "elevenlabs",
+            "use": 'start_session(provider="elevenlabs", voice=<voice>)',
+            "count": len(matches),
+            "voices": matches[:120],
+        }
     if not _VOICE_CACHE:
         import edge_tts
 
@@ -1440,7 +1471,6 @@ async def list_voices(
             for voice in voices
         )
     prefix = language.strip().lower()
-    wanted_gender = gender.strip().lower()
     matches = [
         voice for voice in _VOICE_CACHE
         if (not prefix or (voice["locale"] or "").lower().startswith(prefix))
@@ -1450,6 +1480,7 @@ async def list_voices(
         "ok": True,
         "provider": "edge",
         "default": "en-US-JennyNeural",
+        "elevenlabs_available": elevenlabs_configured(),
         "count": len(matches),
         "voices": matches[:120],
     }
@@ -1963,11 +1994,36 @@ async def update_step_narration(
 
 
 @mcp.tool()
-async def rerender(session_id: str) -> dict:
-    """Rebuild narration audio and mux it onto an existing finished video."""
+async def rerender(
+    session_id: str,
+    voice: Annotated[
+        str | None,
+        Field(description="Re-voice the whole video with this voice (from list_voices). Omit to keep the voice it has."),
+    ] = None,
+    provider: Annotated[
+        str | None,
+        Field(description="The voice's provider, edge or elevenlabs, when voice is given."),
+    ] = None,
+) -> dict:
+    """Rebuild narration audio and mux it onto an existing finished video.
+
+    With voice (and provider), every line is spoken again in that voice — the
+    same take with another narrator, no re-recording. Without, lines that
+    have not changed reuse their recorded audio.
+    """
     session, error = _editable_session(session_id)
     if error:
         return error
+    new_voice = (voice or "").strip() or None
+    new_provider = None
+    if new_voice:
+        try:
+            new_provider = normalize_provider(provider or session.get("provider") or "edge")
+            validate_provider(new_provider)
+        except TTSProviderError as exc:
+            return {"ok": False, "error": {"type": "tts_provider_unconfigured", "message": str(exc)}}
+        store.update_session_voice(session_id, new_voice, new_provider)
+        session["voice"], session["provider"] = new_voice, new_provider
     video_path = Path(session["video_path"])
     output_dir = video_path.parent
     source_video = output_dir / "screen.mp4"
@@ -2005,11 +2061,11 @@ async def rerender(session_id: str) -> dict:
         clip: Path | None = None
         duration = 0.0
         if narration:
-            voice = step.get("voice") or session["voice"]
+            voice = new_voice or step.get("voice") or session["voice"]
             # The recorded clip is reused while its line is unchanged: a
             # rerender to fix a camera move or a card no longer depends on the
-            # TTS service being up, and is faster.
-            stored = step.get("narration_clip")
+            # TTS service being up, and is faster. A new voice speaks it again.
+            stored = None if new_voice else step.get("narration_clip")
             if stored and (output_dir / stored).is_file():
                 clip = output_dir / stored
             else:

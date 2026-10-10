@@ -50,6 +50,7 @@ async def _synthesize_elevenlabs(text: str, voice: str, path: Path) -> Path:
                 "Accept": "audio/mpeg",
                 "Content-Type": "application/json",
                 "xi-api-key": api_key,
+                "User-Agent": "reel-studio",
             },
             method="POST",
         )
@@ -67,6 +68,47 @@ async def _synthesize_elevenlabs(text: str, voice: str, path: Path) -> Path:
     audio = await asyncio.to_thread(request_audio)
     path.write_bytes(audio)
     return path
+
+
+def elevenlabs_configured() -> bool:
+    return bool(os.environ.get("ELEVENLABS_API_KEY"))
+
+
+async def list_elevenlabs_voices() -> list[dict]:
+    """The voices on the ElevenLabs account the host's key belongs to."""
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise TTSProviderError("ELEVENLABS_API_KEY is not set on this reel-studio")
+
+    def fetch() -> dict:
+        request = urllib.request.Request(
+            "https://api.elevenlabs.io/v1/voices",
+            headers={"xi-api-key": api_key, "Accept": "application/json", "User-Agent": "reel-studio"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")[:300]
+            raise TTSProviderError(f"ElevenLabs voices request failed ({exc.code}): {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise TTSProviderError(f"ElevenLabs voices request failed: {exc}") from exc
+
+    data = await asyncio.to_thread(fetch)
+    voices = []
+    for voice in data.get("voices", []):
+        labels = voice.get("labels") or {}
+        voices.append({
+            "voice": voice.get("voice_id"),
+            "name": voice.get("name"),
+            "gender": (labels.get("gender") or "").capitalize(),
+            "accent": labels.get("accent") or "",
+            "age": labels.get("age") or "",
+            "description": labels.get("description") or labels.get("descriptive") or "",
+            "use_case": labels.get("use_case") or "",
+            "category": voice.get("category") or "",
+        })
+    return voices
 
 
 async def synthesize(
