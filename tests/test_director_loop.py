@@ -456,3 +456,63 @@ def test_a_caption_hold_survives_a_rerender(mods, monkeypatch, tmp_path):
     result = asyncio.run(server.rerender("s-hold"))
     assert result["ok"]
     assert [round(hold, 2) for _, _, hold in captured["steps"]] == [3.5, 0.0]
+
+
+def test_edge_tts_retries_a_refusal(monkeypatch, tmp_path):
+    from reel_studio import tts
+
+    calls = {"n": 0}
+
+    class Flaky:
+        def __init__(self, text, voice):
+            pass
+
+        async def save(self, path):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("403, message='Invalid response status'")
+            open(path, "wb").write(b"ID3audio")
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(tts.edge_tts, "Communicate", Flaky)
+    monkeypatch.setattr(tts.asyncio, "sleep", no_sleep)
+    path = asyncio.run(tts.synthesize("Hello.", "en-GB-RyanNeural", tmp_path, "edge"))
+    assert path.is_file() and calls["n"] == 3
+
+    calls["n"] = -100  # never succeeds within the attempts
+    with pytest.raises(tts.TTSProviderError, match="refusing"):
+        asyncio.run(tts.synthesize("Hello.", "en-GB-RyanNeural", tmp_path, "edge"))
+
+
+@pytest.mark.skipif(__import__("shutil").which("ffmpeg") is None, reason="ffmpeg is required")
+def test_rerender_reuses_an_unchanged_clip(mods, monkeypatch, tmp_path):
+    server, store, _ = mods
+    import subprocess
+    from types import SimpleNamespace
+
+    session_dir = tmp_path / "s-reuse"
+    session_dir.mkdir()
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=64x36:r=25:d=6", "-pix_fmt", "yuv420p",
+                    str(session_dir / "screen.mp4")], check=True)
+    (session_dir / "video.mp4").write_bytes((session_dir / "screen.mp4").read_bytes())
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=2", str(session_dir / "narration-a.mp3")], check=True)
+    store.create_session("s-reuse", "https://example.com", "en-US-JennyNeural", 64, 36,
+                         str(session_dir), "edge", None, None, "", "", "#1f2a44", "", "Learn more", "none")
+    store.append_step("s-reuse", "caption", None, "https://example.com", "t", "Hello there.", 2.0, 1.0,
+                      None, True, None, "en-US-JennyNeural", narration_clip="narration-a.mp3")
+    store.finish_session("s-reuse", str(session_dir / "video.mp4"), None, 5.0)
+
+    async def refuse(*args, **kwargs):
+        raise AssertionError("an unchanged line must not be synthesized again")
+
+    monkeypatch.setattr(server, "synthesize", refuse)
+    monkeypatch.setattr(server, "segmented_render", lambda *a, **k: SimpleNamespace(warnings=[], duration=4.0))
+    assert asyncio.run(server.rerender("s-reuse"))["ok"]
+
+    # Changing the words invalidates the clip.
+    store.update_step_narration("s-reuse", 0, "Something else.")
+    assert store.get_session("s-reuse")["steps"][0]["narration_clip"] is None

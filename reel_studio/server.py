@@ -1674,6 +1674,7 @@ async def _run_action(
         parsed_action.quiet,
         parsed_action.offscreen,
         payload.get("annotation_duration") or 0.0,
+        payload.get("narration_clip"),
     )
     return payload, screenshot
 
@@ -2005,12 +2006,20 @@ async def rerender(session_id: str) -> dict:
         duration = 0.0
         if narration:
             voice = step.get("voice") or session["voice"]
-            clip = await synthesize(
-                narration, voice, output_dir, session.get("provider", "edge")
-            )
+            # The recorded clip is reused while its line is unchanged: a
+            # rerender to fix a camera move or a card no longer depends on the
+            # TTS service being up, and is faster.
+            stored = step.get("narration_clip")
+            if stored and (output_dir / stored).is_file():
+                clip = output_dir / stored
+            else:
+                clip = await synthesize(
+                    narration, voice, output_dir, session.get("provider", "edge")
+                )
             duration = await asyncio.to_thread(probe_duration, clip)
             store.update_step_narration(
-                session_id, index, narration, voice, narration_duration=duration
+                session_id, index, narration, voice, narration_duration=duration,
+                narration_clip=clip.name,
             )
             clips.append((offset, clip))
         else:
