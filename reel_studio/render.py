@@ -1,6 +1,7 @@
 """ffmpeg and X11 recording helpers."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path
 import re
@@ -457,6 +458,10 @@ class SegmentedRenderResult:
     path: Path
     duration: float
     warnings: list[dict]
+    # Where each part sits in the finished video: {"kind": "intro" | "lead" |
+    # "step" | "outro", "step": index into the steps rendered, "start",
+    # "duration"} — the storyboard's timings and frames come from it.
+    timeline: list[dict] = field(default_factory=list)
 
 
 def segmented_render_enabled() -> bool:
@@ -599,12 +604,13 @@ def segmented_render(
             cumulative = video_duration
 
         if config.transitions == "smooth" and segment_paths and len(segments) > 0:
-            _assemble_smooth(
+            timeline = _assemble_smooth(
                 segment_paths, segment_pages,
                 [segment.clip for segment in segments],
                 output_path, output_size, config, temporary_path,
+                [segment.step_index for segment in segments],
             )
-            return SegmentedRenderResult(output_path, probe_duration(output_path), warnings)
+            return SegmentedRenderResult(output_path, probe_duration(output_path), warnings, timeline)
 
         joined = temporary_path / "joined.mp4"
         concat_list = temporary_path / "segments.txt"
@@ -626,7 +632,21 @@ def segmented_render(
             )
         else:
             _mux_segment_audio(joined, audio_clips, output_path, cumulative)
-    return SegmentedRenderResult(output_path, probe_duration(output_path), warnings)
+    # Hard cuts: parts follow each other, after the title card if there is one.
+    timeline: list[dict] = []
+    at = 0.0
+    if config.title.strip():
+        timeline.append({"kind": "intro", "step": None, "start": 0.0, "duration": CARD_DURATION})
+        at = CARD_DURATION
+    for segment in segments:
+        timeline.append({
+            "kind": "lead" if segment.step_index is None else "step", "step": segment.step_index,
+            "start": round(at, 3), "duration": round(segment.output_duration, 3),
+        })
+        at += segment.output_duration
+    if config.cta_url.strip():
+        timeline.append({"kind": "outro", "step": None, "start": round(at, 3), "duration": CARD_DURATION})
+    return SegmentedRenderResult(output_path, probe_duration(output_path), warnings, timeline)
 
 
 SOFT_DISSOLVE = 0.25
@@ -711,8 +731,12 @@ def _assemble_smooth(
     output_size: tuple[int, int] | None,
     config: RenderConfig,
     temporary: Path,
-) -> None:
+    step_indices: Sequence[int | None] | None = None,
+) -> list[dict]:
     """Join segments and cards in one xfade chain, then lay the narration on.
+
+    Returns where each part landed in the finished video (see
+    SegmentedRenderResult.timeline).
 
     Each dissolve overlaps two parts, so every later part — and its
     narration — starts that much earlier; offsets are tracked as the chain is
@@ -752,12 +776,22 @@ def _assemble_smooth(
         parts.append((outro, None))
         joins.append(CARD_FADE)
 
+    kinds: list[tuple[str, int | None]] = []
+    if config.title.strip():
+        kinds.append(("intro", None))
+    for position in range(len(segment_paths)):
+        step = step_indices[position] if step_indices and position < len(step_indices) else None
+        kinds.append(("lead" if step is None else "step", step))
+    if config.cta_url.strip():
+        kinds.append(("outro", None))
+
     command = ["ffmpeg", "-loglevel", "error", "-y"]
     for path, _ in parts:
         command += ["-i", str(path)]
     chain: list[str] = []
     label = "[0:v]"
     end = probe_duration(parts[0][0])
+    placed = [{"kind": kinds[0][0], "step": kinds[0][1], "start": 0.0, "duration": round(end, 3)}]
     audio: list[tuple[float, Path]] = []
     if parts[0][1] is not None:
         audio.append((0.0, parts[0][1]))
@@ -771,7 +805,10 @@ def _assemble_smooth(
         label = f"[v{index}]"
         if parts[index][1] is not None:
             audio.append((start, cast(Path, parts[index][1])))
-        end = start + probe_duration(parts[index][0])
+        length = probe_duration(parts[index][0])
+        end = start + length
+        placed.append({"kind": kinds[index][0], "step": kinds[index][1],
+                       "start": round(start, 3), "duration": round(length, 3)})
     body = temporary / "smooth.mp4"
     command += (
         ["-filter_complex", ";".join(chain), "-map", label] if chain else ["-map", "0:v"]
@@ -780,6 +817,46 @@ def _assemble_smooth(
                 "-r", "25", str(body)]
     subprocess.run(command, check=True)
     _mux_segment_audio(body, audio, output_path, end, config.music)
+    return placed
+
+
+STORYBOARD_FILE = "storyboard.json"
+STORYBOARD_DIR = "storyboard"
+
+
+def write_storyboard(directory: Path, video: Path, timeline: Sequence[dict]) -> list[dict]:
+    """Save the finished video's timeline and one still per part.
+
+    The still is taken a little past the middle of each part — after a
+    camera move has landed — at 480x270: the watch page's storyboard shows
+    them, and the storyboard tool tiles them into a contact sheet.
+    """
+    frames_dir = directory / STORYBOARD_DIR
+    frames_dir.mkdir(exist_ok=True)
+    for old in frames_dir.glob("*.jpg"):
+        old.unlink(missing_ok=True)
+    entries = []
+    for number, part in enumerate(timeline):
+        at = part["start"] + min(part["duration"] * 0.6, max(part["duration"] - 0.15, 0.0))
+        name: str | None = f"part-{number:03d}.jpg"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-loglevel", "error", "-y", "-ss", f"{at:.3f}", "-i", str(video),
+                 "-frames:v", "1", "-vf", "scale=480:270", "-q:v", "4", str(frames_dir / name)],
+                check=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            name = None
+        entries.append({**part, "frame": name})
+    (directory / STORYBOARD_FILE).write_text(json.dumps({"parts": entries}))
+    return entries
+
+
+def read_storyboard(directory: Path) -> list[dict]:
+    try:
+        return json.loads((directory / STORYBOARD_FILE).read_text()).get("parts", [])
+    except (OSError, ValueError):
+        return []
 
 
 def _render_video_segment(

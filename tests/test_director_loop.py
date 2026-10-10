@@ -565,3 +565,54 @@ def test_rerender_can_revoice_a_finished_video(mods, monkeypatch, tmp_path):
     assert spoken == [("en-GB-RyanNeural", "edge")]
     session = store.get_session("s-revoice")
     assert session["voice"] == "en-GB-RyanNeural" and session["steps"][0]["voice"] == "en-GB-RyanNeural"
+
+
+def test_a_voice_that_cannot_speak_stops_start_session_before_recording(mods, monkeypatch):
+    server, _, _ = mods
+
+    async def mute(*args, **kwargs):
+        raise RuntimeError("403 Invalid response status")
+
+    async def must_not_record(*args, **kwargs):
+        raise AssertionError("nothing may record when the voice is down")
+
+    monkeypatch.setattr(server, "synthesize", mute)
+    monkeypatch.setattr(server.BrowserSession, "create", must_not_record)
+    result = asyncio.run(server.start_session("https://example.com"))
+    assert result["error"]["type"] == "voice_unavailable"
+
+
+@pytest.mark.skipif(__import__("shutil").which("ffmpeg") is None, reason="ffmpeg is required")
+def test_storyboard_shows_the_finished_film(mods, tmp_path):
+    server, store, _ = mods
+    import subprocess
+    from reel_studio import render
+
+    session_dir = tmp_path / "s-board"
+    session_dir.mkdir()
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=size=320x176:rate=25", "-t", "6", "-pix_fmt", "yuv420p",
+                    str(session_dir / "video.mp4")], check=True)
+    store.create_session("s-board", "https://example.com", "en-US-JennyNeural", 320, 176,
+                         str(session_dir), "edge", None, None, "", "", "#1f2a44", "", "Learn more", "none")
+    store.append_step("s-board", "type", "input:email", "https://example.com", "t", "", 0.0, 0.5,
+                      None, True, None, offscreen=True)
+    store.append_step("s-board", "caption", None, "https://example.com", "t", "The hook.", 2.0, 1.0,
+                      None, True, None)
+    store.append_step("s-board", "click", "button:go", "https://example.com", "t", "", 0.0, 3.0,
+                      None, True, None, quiet=True)
+    store.finish_session("s-board", str(session_dir / "video.mp4"), None, 6.0)
+    render.write_storyboard(session_dir, session_dir / "video.mp4", [
+        {"kind": "step", "step": 0, "start": 0.0, "duration": 2.5},
+        {"kind": "step", "step": 1, "start": 2.5, "duration": 9.0},
+    ])
+    result = asyncio.run(server.storyboard("s-board"))
+    payload = result.structuredContent
+    assert [r.get("step") for r in payload["parts"]] == [1, 2]
+    assert payload["parts"][0]["narration"] == "The hook."
+    assert "holds over 8 s" in payload["parts"][1]["note"]
+    assert any(getattr(c, "type", "") == "image" for c in result.content)
+
+    page = server.watch_page("s-board")
+    assert 'src="/videos/s-board/storyboard/part-000.jpg"' in page
+    assert "not in the video" in page and 'data-seek="2.50"' in page
