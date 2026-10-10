@@ -283,7 +283,7 @@ class FocusSession(FakeSession):
     async def assert_visible(self, text):
         return {"visible": False, "box": None, "in_viewport": False}
 
-    async def set_shot(self, framing, zoom=None, focus_ref=None, focus_text=None):
+    async def set_shot(self, framing, zoom=None, focus_ref=None, focus_text=None, move_seconds=None):
         return {"camera_zoom": 1.0}
 
 
@@ -616,3 +616,50 @@ def test_storyboard_shows_the_finished_film(mods, tmp_path):
     page = server.watch_page("s-board")
     assert 'src="/videos/s-board/storyboard/part-000.jpg"' in page
     assert "not in the video" in page and 'data-seek="2.50"' in page
+
+
+def test_a_finished_step_can_be_hidden_held_or_sped_up(mods, monkeypatch, tmp_path):
+    server, store, _ = mods
+    import subprocess
+    from types import SimpleNamespace
+
+    session_dir = tmp_path / "s-edit"
+    session_dir.mkdir()
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=64x36:r=25:d=9", "-pix_fmt", "yuv420p",
+                    str(session_dir / "screen.mp4")], check=True)
+    (session_dir / "video.mp4").write_bytes((session_dir / "screen.mp4").read_bytes())
+    store.create_session("s-edit", "https://example.com", "en-US-JennyNeural", 64, 36,
+                         str(session_dir), "edge", None, None, "", "", "#1f2a44", "", "Learn more", "none")
+    for offset in (1.0, 3.0, 6.0):
+        store.append_step("s-edit", "click", "button:x", "https://example.com", "t", "", 0.0, offset,
+                          None, True, None)
+    store.finish_session("s-edit", str(session_dir / "video.mp4"), None, 9.0)
+
+    assert not asyncio.run(server.edit_step("s-edit", 1, speed=40))["ok"]
+    assert asyncio.run(server.edit_step("s-edit", 7, hidden=True))["error"]["type"] == "unknown_step"
+    assert asyncio.run(server.edit_step("s-edit", 0, hidden=True))["ok"]
+    assert asyncio.run(server.edit_step("s-edit", 1, speed=6))["step"]["speed"] == 6
+    assert asyncio.run(server.edit_step("s-edit", 2, hold_seconds=4))["ok"]
+
+    captured = {}
+
+    def fake_render(source, steps, video_path, *args, **kwargs):
+        captured["steps"] = steps
+        captured["args"] = args
+        return SimpleNamespace(warnings=[], duration=8.0, timeline=[])
+
+    monkeypatch.setattr(server, "segmented_render", fake_render)
+    assert asyncio.run(server.rerender("s-edit"))["ok"]
+    offsets = [offset for offset, _, _ in captured["steps"]]
+    assert 1.0 not in offsets  # the hidden step is gone
+    assert captured["args"][-1][-2:] == [6.0, 1.0]
+    assert captured["steps"][-1][2] == 4.0
+
+
+def test_the_director_hears_about_the_new_tricks(mods):
+    server, _, _ = mods
+    tools = _tools(server)
+    assert "edit_step" in tools
+    assert "move_seconds" in json.dumps(tools["begin_shot"].inputSchema)
+    assert "closing_qr" in json.dumps(tools["start_session"].inputSchema)

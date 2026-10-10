@@ -34,6 +34,9 @@ class RenderConfig:
     # video itself, blurred and dimmed under the text, like a hero section —
     # "solid" (the accent colour), or an https image URL.
     title_background: str = "auto"
+    # A QR code of cta_url on the closing card: on LinkedIn the link in a
+    # video cannot be clicked, but a phone can scan it off a laptop screen.
+    closing_qr: bool = True
 
 
 def start_recording(display: str, width: int, height: int, output: Path) -> subprocess.Popen[bytes]:
@@ -316,6 +319,49 @@ def _card(
     )
 
 
+def make_qr(url: str, output: Path) -> Path | None:
+    """A QR code of url as a PNG, dark on white with a quiet zone; None if
+    the library is missing or the URL will not encode."""
+    try:
+        import segno
+    except ImportError:
+        return None
+    try:
+        segno.make(url, error="m").save(str(output), scale=12, border=2, dark="#0d111a", light="#ffffff")
+    except Exception:
+        return None
+    return output if output.is_file() else None
+
+
+def _overlay_qr(card: Path, qr: Path, width: int, height: int) -> None:
+    """Put the QR code in the closing card's bottom-right corner."""
+    side = max(96, int(height * 0.22)) // 2 * 2
+    margin = max(24, int(height * 0.06))
+    out = card.with_name(card.stem + "-qr.mp4")
+    result = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-i", str(card), "-i", str(qr),
+         "-filter_complex", f"[1:v]scale={side}:{side}:flags=neighbor[q];[0:v][q]overlay=W-w-{margin}:H-h-{margin}",
+         "-an", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-r", "25", str(out)],
+    )
+    if result.returncode == 0 and out.is_file():
+        out.replace(card)
+
+
+def _closing_card(outro: Path, width: int, height: int, config: RenderConfig, background: Path | None, temporary: Path) -> None:
+    _card(
+        outro, width, height, config.accent,
+        [
+            (config.cta_text.strip() or "Learn more", max(28, width // 32)),
+            (config.cta_url.strip(), max(22, width // 44)),
+        ],
+        background,
+    )
+    if config.closing_qr:
+        qr = make_qr(config.cta_url.strip(), temporary / "closing-qr.png")
+        if qr is not None:
+            _overlay_qr(outro, qr, width, height)
+
+
 def _compose_video(
     body_path: Path,
     clips: Sequence[tuple[float, Path]],
@@ -347,14 +393,7 @@ def _compose_video(
     parts.append(body_path)
     if config.cta_url.strip():
         outro = temporary / "outro.mp4"
-        _card(
-            outro, width, height, config.accent,
-            [
-                (config.cta_text.strip() or "Learn more", max(28, width // 32)),
-                (config.cta_url.strip(), max(22, width // 44)),
-            ],
-            outro_background,
-        )
+        _closing_card(outro, width, height, config, outro_background, temporary)
         parts.append(outro)
     base = temporary / "branded-base.mp4"
     concat = temporary / "branded.txt"
@@ -480,6 +519,8 @@ class Segment:
     # Position of the step in the steps given to plan_segments; None for the
     # lead-in.
     step_index: int | None = None
+    # A time-lapse: the source plays this many times faster.
+    speed: float = 1.0
 
 
 def plan_segments(
@@ -487,6 +528,7 @@ def plan_segments(
     video_duration: float,
     floors: Sequence[float] | None = None,
     lead_in: bool = True,
+    speeds: Sequence[float] | None = None,
 ) -> tuple[list[Segment], list[dict]]:
     """The windows of the recording a segmented render keeps, in order.
 
@@ -522,6 +564,14 @@ def plan_segments(
             floors[step_index]
             if floors is not None and step_index < len(floors) else SEGMENT_FLOOR
         )
+        speed = speeds[step_index] if speeds is not None and step_index < len(speeds) else 1.0
+        if speed and speed > 1.0:
+            # A time-lapse keeps all of the step's footage, sped up; it lasts
+            # at least as long as its line.
+            played = available / speed
+            keep = max(played, narration_duration + SEGMENT_TAIL_PAD if narration_duration else 0.0, QUIET_FLOOR)
+            segments.append(Segment(f"{index:04d}", offset, available, keep, clip, step_index, speed))
+            continue
         target = (max(narration_duration, floor) + SEGMENT_TAIL_PAD) if narration_duration else (
             floor + (SEGMENT_TAIL_PAD if floor >= SEGMENT_FLOOR else 0.0)
         )
@@ -550,6 +600,7 @@ def segmented_render(
     pages: Sequence[str] | None = None,
     floors: Sequence[float] | None = None,
     lead_in: bool = True,
+    speeds: Sequence[float] | None = None,
 ) -> SegmentedRenderResult:
     """Render kept step windows from the original continuous recording.
 
@@ -561,7 +612,7 @@ def segmented_render(
     if camera is not None:
         output_size = camera.output_size(output_size)
     video_duration = probe_duration(video_path)
-    segments, warnings = plan_segments(steps, video_duration, floors, lead_in)
+    segments, warnings = plan_segments(steps, video_duration, floors, lead_in, speeds)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".segments-", dir=output_path.parent
@@ -587,6 +638,7 @@ def segmented_render(
                     temporary_path / f"segment-{segment.name}.mp4",
                     output_size,
                     camera,
+                    segment.speed,
                 )
             )
             if segment.clip is not None:
@@ -765,14 +817,7 @@ def _assemble_smooth(
     joins.extend(choose_transitions(segment_paths, pages, temporary))
     if config.cta_url.strip():
         outro = temporary / "outro.mp4"
-        _card(
-            outro, width, height, config.accent,
-            [
-                (config.cta_text.strip() or "Learn more", max(28, width // 32)),
-                (config.cta_url.strip(), max(22, width // 44)),
-            ],
-            outro_background,
-        )
+        _closing_card(outro, width, height, config, outro_background, temporary)
         parts.append((outro, None))
         joins.append(CARD_FADE)
 
@@ -867,6 +912,7 @@ def _render_video_segment(
     output_path: Path,
     output_size: tuple[int, int] | None = None,
     camera: "Camera | None" = None,
+    speed: float = 1.0,
 ) -> Path:
     # -t is an input option here. After -i it capped the output instead, and
     # cut off the frozen frames tpad adds when narration outlasts the footage
@@ -876,21 +922,27 @@ def _render_video_segment(
         "-ss", f"{offset:.3f}", "-t", f"{source_duration:.3f}",
         "-i", str(video_path),
     ]
-    extension = output_duration - source_duration
+    played = source_duration / speed if speed > 1.0 else source_duration
+    filters = [f"setpts=PTS/{speed:.4f}"] if speed > 1.0 else []
+    extension = output_duration - played
     if extension > 0.01:
-        filters = [f"tpad=stop_mode=clone:stop_duration={extension:.3f}"]
-    else:
-        filters = []
+        filters.append(f"tpad=stop_mode=clone:stop_duration={extension:.3f}")
     camera_filter = None
     if camera is not None:
         size = output_size or camera.physical_size
-        camera_filter = camera.zoompan(offset, offset + source_duration, size)
+        camera_filter = camera.zoompan(offset, offset + source_duration, size, speed=speed)
     if camera_filter:
         # After tpad, so a move keeps easing over a held frame; zoompan
         # crops and scales to the output size in one pass.
         filters.append(camera_filter)
     elif output_size is not None:
         filters.append(f"scale={output_size[0]}:{output_size[1]}")
+    if speed > 1.0 and Path(FONT_PATH).is_file():
+        # Say it is sped up, so a time-lapse never reads as the real pace.
+        filters.append(
+            f"drawtext=fontfile={FONT_PATH}:text='{speed:g}×':fontcolor=white:fontsize=h/22:"
+            "box=1:boxcolor=black@0.55:boxborderw=14:x=w-tw-48:y=40"
+        )
     if filters:
         command.extend(["-vf", ",".join(filters)])
     command.extend([
